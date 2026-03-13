@@ -10,6 +10,9 @@ import ConnectionPanel from "./components/ConnectionPanel.vue";
 import TrackerStatusComponent from "./components/TrackerStatus.vue";
 import TrackerControl from "./components/TrackerControl.vue";
 import NotificationManager from "./components/NotificationManager.vue";
+import BaseButton from "./components/ui/BaseButton.vue";
+import BaseSpinner from "./components/ui/BaseSpinner.vue";
+import WindowTitleBar from "./components/ui/WindowTitleBar.vue";
 
 // 导入资源
 import logoUrl from "./assets/FoxApplication.png";
@@ -88,6 +91,7 @@ const ACTION_DELAYS: Record<string, number> = {
 let nextNotifyId = 0;
 let overlayTimer: number | null = null;
 let connectionMonitorTimer: number | null = null;
+const BACKEND_I18N_PREFIX = "i18n:";
 
 function startOverlayTimer(action: string) {
   elapsedTime.value = 0;
@@ -131,10 +135,42 @@ function resetConnectedState(): void {
   ledEnabled.value = false;
 }
 
+function resolveBackendI18nMessage(raw: string): string | null {
+  if (!raw.startsWith(BACKEND_I18N_PREFIX)) return null;
+  const payload = raw.slice(BACKEND_I18N_PREFIX.length);
+  const separatorIndex = payload.indexOf("|");
+  const key = separatorIndex === -1 ? payload : payload.slice(0, separatorIndex);
+  if (!key) return null;
+  if (separatorIndex === -1) {
+    return t(key);
+  }
+  const paramsText = payload.slice(separatorIndex + 1);
+  try {
+    const parsed = JSON.parse(paramsText) as Record<string, unknown>;
+    const resolvedParams = Object.fromEntries(
+      Object.entries(parsed).map(([paramKey, paramValue]) => {
+        if (typeof paramValue === "string") {
+          return [paramKey, resolveBackendI18nMessage(paramValue) ?? paramValue];
+        }
+        return [paramKey, paramValue];
+      }),
+    );
+    return t(key, resolvedParams);
+  } catch {
+    return t(key);
+  }
+}
+
 // --- 核心业务逻辑 ---
 function getErrorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
+  const rawMessage = typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : "";
+  if (rawMessage) {
+    return resolveBackendI18nMessage(rawMessage) ?? rawMessage;
+  }
   return t('common.unknown_error');
 }
 
@@ -424,11 +460,13 @@ onUnmounted(() => {
   <DebugConsole v-if="isDebugWindow" />
 
   <main v-else class="page">
+    <WindowTitleBar />
+
     <!-- 全屏遮罩层 -->
     <Teleport to="body">
       <div v-if="showOverlay" class="loading-overlay">
         <div class="loading-content">
-          <div class="spinner"></div>
+          <BaseSpinner />
           <p>{{ t('common.processing') }}</p>
           <div class="progress-info">
             {{ t('common.execution_time', { elapsed: elapsedTime.toFixed(1), estimated: estimatedTime.toFixed(1) }) }}
@@ -440,18 +478,25 @@ onUnmounted(() => {
       </div>
     </Teleport>
 
-    <header class="header">
+    <div class="main-content">
+      <header class="header">
       <div class="header-bar">
         <div class="header-title-area">
           <img :src="logoUrl" class="logo" alt="FoxDock Logo" />
-          <h1>{{ t('app.title') }}</h1>
+          <div class="header-text">
+            <h1>{{ t('app.title') }}</h1>
+            <p>{{ t('app.subtitle') }}</p>
+          </div>
         </div>
         <div class="header-actions">
-          <button class="lang-btn" @click="toggleLocale">{{ locale === 'zh' ? 'English' : '中文' }}</button>
-          <button class="debug-btn" @click="openDebug">{{ t('app.debug_btn') }}</button>
+          <BaseButton variant="outline" @click="toggleLocale">
+            {{ locale === 'zh' ? 'EN' : '中' }}
+          </BaseButton>
+          <BaseButton variant="debug" @click="openDebug">
+            {{ t('app.debug_btn') }}
+          </BaseButton>
         </div>
       </div>
-      <p>{{ t('app.subtitle') }}</p>
     </header>
 
     <ConnectionPanel 
@@ -481,34 +526,36 @@ onUnmounted(() => {
     />
 
     <NotificationManager :notifications="notifications" />
+    </div>
   </main>
 </template>
 
 <style scoped>
 .page {
-  min-height: 100vh;
-  margin: 0;
-  padding: 20px;
-  background: #e8f2ff;
-  color: #12304f;
-  font-family: "Segoe UI", Arial, sans-serif;
+  min-height: var(--window-min-height);
+  height: 100%;
+  width: var(--window-width);
+  margin: 0 auto;
+  background: var(--color-bg-page);
+  color: var(--color-text-main);
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.main-content {
+  flex: 1;
+  padding: var(--spacing-md);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .header {
-  margin-bottom: 16px;
-  border: 2px solid #59a9ff;
-  background: #d7ebff;
-  padding: 12px 16px;
-}
-
-.header h1 {
-  margin: 0 0 6px;
-  font-size: 24px;
-}
-
-.header p {
-  margin: 0;
-  color: #2f5d8f;
+  margin-bottom: var(--spacing-md);
+  border: var(--border-width) solid var(--color-secondary);
+  background: var(--color-bg-header);
+  padding: var(--spacing-sm) var(--spacing-md);
 }
 
 .header-bar {
@@ -520,40 +567,29 @@ onUnmounted(() => {
 .header-title-area {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--spacing-sm);
 }
 
 .logo {
-  height: 40px;
+  height: 32px;
   width: auto;
+}
+
+.header-text h1 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.header-text p {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-light);
 }
 
 .header-actions {
   display: flex;
-  gap: 8px;
-}
-
-.debug-btn, .lang-btn {
-  background: #0078d4;
-  color: white;
-  border: none;
-  padding: 6px 12px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.lang-btn {
-  background: #ffffff;
-  color: #0078d4;
-  border: 2px solid #0078d4;
-}
-
-.debug-btn:hover {
-  background: #106ebe;
-}
-
-.lang-btn:hover {
-  background: #f3f9ff;
+  gap: var(--spacing-xs);
 }
 
 /* 全屏遮罩样式 */
@@ -572,53 +608,41 @@ onUnmounted(() => {
 }
 
 .loading-content {
-  background: white;
+  background: var(--color-bg-white);
   padding: 30px 50px;
-  border: 2px solid #0078d4;
-  box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.2);
+  border: var(--border-width) solid var(--color-primary);
+  box-shadow: var(--box-shadow-heavy);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: var(--spacing-lg);
 }
 
 .loading-content p {
   margin: 0;
   font-weight: bold;
-  color: #0078d4;
+  color: var(--color-primary);
   font-size: 16px;
 }
 
 .progress-info {
-  font-family: "Courier New", Courier, monospace;
+  font-family: var(--font-family-mono);
   font-size: 14px;
-  color: #184470;
+  color: var(--color-text-secondary);
 }
 
 .progress-bar-container {
   width: 240px;
   height: 8px;
   background: #f0f0f0;
-  border: 1px solid #0078d4;
+  border: 1px solid var(--color-primary);
+  border-radius: 0;
 }
 
 .progress-bar {
   height: 100%;
-  background: #0078d4;
+  background: var(--color-primary);
   transition: width 0.1s linear;
-}
-
-.spinner {
-  width: 40px;
-  height: 40px;
-  border: 4px solid #f3f3f3;
-  border-top: 4px solid #0078d4;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  border-radius: 0;
 }
 </style>

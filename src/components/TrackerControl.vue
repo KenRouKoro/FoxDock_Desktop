@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
+import BaseButton from "./ui/BaseButton.vue";
+import BasePanel from "./ui/BasePanel.vue";
+import BaseSelect from "./ui/BaseSelect.vue";
+
 const { t } = useI18n();
 
 defineProps<{
@@ -34,61 +38,49 @@ const allActions = [
 </script>
 
 <template>
-  <section class="panel">
-    <h2>{{ t('tracker_control.title') }}</h2>
+  <BasePanel :title="t('tracker_control.title')">
     <div class="row">
       <label for="trackerId">{{ t('tracker_control.slot_label') }}</label>
-      <select id="trackerId" v-model.number="selectedTrackerId" :disabled="loading">
+      <BaseSelect id="trackerId" v-model.number="selectedTrackerId" :disabled="loading">
         <option v-for="id in 10" :key="id" :value="id">{{ id }}</option>
-      </select>
+      </BaseSelect>
     </div>
     <div class="button-grid">
-      <button
+      <BaseButton
         v-for="item in singleActions"
         :key="item.value"
+        variant="outline"
         :disabled="loading || !connectedPortName"
         @click="emit('runSingleAction', item.value, selectedTrackerId)"
       >
         {{ t(`tracker_control.${item.label}`) }}
-      </button>
+      </BaseButton>
     </div>
     <div class="button-grid">
-      <button
+      <BaseButton
         v-for="item in allActions"
         :key="item.value"
+        variant="outline"
         :disabled="loading || !connectedPortName"
         @click="emit('runAllAction', item.value)"
       >
         {{ t(`tracker_control.${item.label}`) }}
-      </button>
+      </BaseButton>
     </div>
     <div class="row">
-      <button :disabled="loading || !connectedPortName" @click="emit('toggleLed')">
+      <BaseButton variant="outline" :disabled="loading || !connectedPortName" @click="emit('toggleLed')">
         {{ t('tracker_control.led_label') }}{{ ledEnabled ? t('common.on') : t('common.off') }}
-      </button>
-      <button :disabled="loading || !connectedPortName" @click="emit('refreshStatus')">{{ t('tracker_control.refresh_status') }}</button>
+      </BaseButton>
+      <BaseButton variant="outline" :disabled="loading || !connectedPortName" @click="emit('refreshStatus')">{{ t('tracker_control.refresh_status') }}</BaseButton>
     </div>
-  </section>
+  </BasePanel>
 </template>
 
 <style scoped>
-.panel {
-  border: 2px solid #59a9ff;
-  background: #f4faff;
-  padding: 12px;
-  margin-bottom: 12px;
-}
-
-.panel h2 {
-  margin: 0 0 10px;
-  font-size: 18px;
-  color: #184470;
-}
-
 .row {
   display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
   align-items: center;
   flex-wrap: wrap;
 }
@@ -96,30 +88,7 @@ const allActions = [
 .button-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-select,
-button {
-  border: 2px solid #59a9ff;
-  border-radius: 0;
-  background: #ffffff;
-  color: #12304f;
-  padding: 6px 10px;
-  font-size: 14px;
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover:enabled {
-  background: #d7ebff;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
 }
 </style>

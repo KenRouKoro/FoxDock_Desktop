@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
+import { ref, watch } from "vue";
+import BaseButton from "./ui/BaseButton.vue";
+import BasePanel from "./ui/BasePanel.vue";
+import BaseSelect from "./ui/BaseSelect.vue";
+
 const { t } = useI18n();
 
 type DockPort = {
@@ -27,7 +32,6 @@ const emit = defineEmits<{
   (e: 'disconnect'): void;
 }>();
 
-import { ref, watch } from "vue";
 const selectedPortName = ref("");
 
 watch(
@@ -42,18 +46,17 @@ watch(
 </script>
 
 <template>
-  <section class="panel">
-    <h2>{{ t('connection.title') }}</h2>
+  <BasePanel :title="t('connection.title')">
     <div class="row">
-      <select v-model="selectedPortName" :disabled="loading">
+      <BaseSelect v-model="selectedPortName" :disabled="loading">
         <option value="">{{ t('connection.select_port') }}</option>
         <option v-for="dock in docks" :key="dock.portName" :value="dock.portName">
           {{ dock.displayName }}
         </option>
-      </select>
-      <button :disabled="loading" @click="emit('refresh')">{{ t('common.refresh') }}</button>
-      <button :disabled="loading || !selectedPortName || !!connectedPortName" @click="emit('connect', selectedPortName)">{{ t('common.connect') }}</button>
-      <button :disabled="loading || !connectedPortName" @click="emit('disconnect')">{{ t('common.disconnect') }}</button>
+      </BaseSelect>
+      <BaseButton :disabled="loading" variant="outline" @click="emit('refresh')">{{ t('common.refresh') }}</BaseButton>
+      <BaseButton :disabled="loading || !selectedPortName || !!connectedPortName" @click="emit('connect', selectedPortName)">{{ t('common.connect') }}</BaseButton>
+      <BaseButton :disabled="loading || !connectedPortName" @click="emit('disconnect')">{{ t('common.disconnect') }}</BaseButton>
     </div>
     <p class="status">
       {{ t('connection.current_status') }}
@@ -65,70 +68,34 @@ watch(
       <div>{{ t('connection.version') }} {{ dockInfo?.version ?? "-" }}</div>
       <div>{{ t('connection.mcu') }} {{ dockInfo?.mcu ?? "-" }}</div>
     </div>
-  </section>
+  </BasePanel>
 </template>
 
 <style scoped>
-.panel {
-  border: 2px solid #59a9ff;
-  background: #f4faff;
-  padding: 12px;
-  margin-bottom: 12px;
-}
-
-.panel h2 {
-  margin: 0 0 10px;
-  font-size: 18px;
-  color: #184470;
-}
-
 .row {
   display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
   align-items: center;
   flex-wrap: wrap;
 }
 
 .status {
-  margin: 8px 0;
+  margin: var(--spacing-sm) 0;
 }
 
 .connected {
-  color: #107c10;
+  color: var(--color-success);
   font-weight: bold;
 }
 
 .disconnected {
-  color: #d83b01;
+  color: var(--color-error);
 }
 
 .info-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(140px, 1fr));
-  gap: 8px;
-}
-
-select,
-button {
-  border: 2px solid #59a9ff;
-  border-radius: 0;
-  background: #ffffff;
-  color: #12304f;
-  padding: 6px 10px;
-  font-size: 14px;
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover:enabled {
-  background: #d7ebff;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+  gap: var(--spacing-sm);
 }
 </style>

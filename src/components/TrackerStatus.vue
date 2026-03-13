@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
+import BasePanel from "./ui/BasePanel.vue";
+
 const { t } = useI18n();
 
 type TrackerStatus = {
@@ -59,8 +61,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="panel">
-    <h2>{{ t('tracker_status.title') }}</h2>
+  <BasePanel :title="t('tracker_status.title')">
     <div class="tracker-column">
       <div 
         v-for="item in trackers" 
@@ -96,33 +97,20 @@ onUnmounted(() => {
         </div>
       </div>
     </Teleport>
-  </section>
+  </BasePanel>
 </template>
 
 <style scoped>
-.panel {
-  border: 2px solid #59a9ff;
-  background: #f4faff;
-  padding: 12px;
-  margin-bottom: 12px;
-}
-
-.panel h2 {
-  margin: 0 0 10px;
-  font-size: 18px;
-  color: #184470;
-}
-
 .tracker-column {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 6px;
+  gap: var(--spacing-xs);
 }
 
 .tracker-cell {
-  border: 2px solid #77b8ff;
+  border: var(--border-width) solid var(--color-secondary);
   background: #eef7ff;
-  padding: 8px;
+  padding: var(--spacing-sm);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -142,34 +130,34 @@ onUnmounted(() => {
 
 .usb-path {
   font-size: 11px;
-  color: #59a9ff;
-  font-family: monospace;
+  color: var(--color-secondary);
+  font-family: var(--font-family-mono);
 }
 
 .tracker-cell.inserted .usb-path {
-  color: #2c8d5f;
+  color: var(--color-success-border);
 }
 
 .tracker-cell.inserted {
-  border-color: #2c8d5f;
-  background: #dff6ea;
+  border-color: var(--color-success-border);
+  background: var(--color-success-bg);
 }
 
 .tracker-cell:hover {
-  background: #d7ebff;
+  background: var(--color-secondary-hover);
 }
 
 .tracker-cell.inserted:hover {
-  background: #cff0df;
+  background: var(--color-success-hover);
 }
 
 /* 右键菜单样式 */
 .context-menu {
   position: fixed;
   z-index: 1000;
-  background: white;
-  border: 2px solid #59a9ff;
-  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.1);
+  background: var(--color-bg-white);
+  border: var(--border-width) solid var(--color-secondary);
+  box-shadow: var(--box-shadow);
   min-width: 150px;
   padding: 4px 0;
 }
@@ -177,8 +165,8 @@ onUnmounted(() => {
 .menu-header {
   padding: 6px 12px;
   font-weight: bold;
-  border-bottom: 1px solid #d7ebff;
-  color: #184470;
+  border-bottom: 1px solid var(--color-secondary-hover);
+  color: var(--color-text-secondary);
   font-size: 12px;
 }
 
@@ -186,11 +174,11 @@ onUnmounted(() => {
   padding: 8px 12px;
   cursor: pointer;
   font-size: 14px;
-  color: #12304f;
+  color: var(--color-text-main);
   transition: background 0.1s;
 }
 
 .menu-item:hover {
-  background: #d7ebff;
+  background: var(--color-secondary-hover);
 }
 </style>

@@ -15,7 +15,7 @@ export default {
   },
   app: {
     title: "FoxDock Console",
-    subtitle: "10-Slot Tracker Dock Manager",
+    subtitle: "FoxSnack Tracker Base",
     debug_btn: "Debug"
   },
   connection: {
@@ -71,5 +71,19 @@ export default {
     event_inserted: "[Event] Slot #{id} Inserted",
     event_removed: "[Event] Slot #{id} Removed",
     event_boot: "[Event] Dock rebooted: {project} v{version}"
+  },
+  backend_errors: {
+    dock_not_connected: "Dock is not connected",
+    command_interrupted: "Command was interrupted",
+    device_timeout: "Device response timeout",
+    command_overridden: "Overridden by a newer command",
+    unexpected_response: "Device did not return {expected} response. Payload: {value}",
+    setupapi_failed: "SetupDiGetClassDevsW failed",
+    port_not_found: "Target dock port not found. Please refresh the device list first",
+    open_serial_failed: "Failed to open serial port: {error}",
+    initial_status_failed: "Connected but failed to fetch initial status: {detail}",
+    tracker_id_out_of_range: "Tracker ID must be between 1 and 10",
+    unsupported_single_action: "Unsupported single tracker action",
+    unsupported_all_action: "Unsupported all-trackers action"
   }
 };

@@ -62,7 +62,7 @@ const clearLogs = () => {
   flex-direction: column !important;
   background-color: #1e1e1e !important;
   color: #d4d4d4 !important;
-  font-family: 'Consolas', 'Monaco', monospace;
+  font-family: var(--font-family-mono);
   font-size: 12px;
   position: fixed !important;
   top: 0 !important;

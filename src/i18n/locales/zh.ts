@@ -15,7 +15,7 @@ export default {
   },
   app: {
     title: "FoxDock 桌面控制台",
-    subtitle: "10 槽位追踪器底座管理",
+    subtitle: "FoxSnack追踪器底座",
     debug_btn: "调试"
   },
   connection: {
@@ -71,5 +71,19 @@ export default {
     event_inserted: "[事件] 槽位 #{id} 已插入",
     event_removed: "[事件] 槽位 #{id} 已拔出",
     event_boot: "[事件] 底座已重启: {project} v{version}"
+  },
+  backend_errors: {
+    dock_not_connected: "当前未连接底座",
+    command_interrupted: "命令执行中途中断",
+    device_timeout: "设备响应超时",
+    command_overridden: "被新命令覆盖",
+    unexpected_response: "设备返回的不是 {expected} 响应。内容: {value}",
+    setupapi_failed: "SetupDiGetClassDevsW 失败",
+    port_not_found: "未找到指定底座端口，请先刷新设备列表",
+    open_serial_failed: "无法打开串口: {error}",
+    initial_status_failed: "连接成功但无法获取初始状态: {detail}",
+    tracker_id_out_of_range: "追踪器 ID 必须在 1 到 10 之间",
+    unsupported_single_action: "不支持的单点控制动作",
+    unsupported_all_action: "不支持的全体控制动作"
   }
 };

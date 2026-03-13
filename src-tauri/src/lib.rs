@@ -86,6 +86,16 @@ struct AckResponse {
     msg: Option<String>,
 }
 
+const I18N_ERROR_PREFIX: &str = "i18n:";
+
+fn i18n_error(key: &str) -> String {
+    format!("{I18N_ERROR_PREFIX}{key}")
+}
+
+fn i18n_error_with_params(key: &str, params: Value) -> String {
+    format!("{I18N_ERROR_PREFIX}{key}|{params}")
+}
+
 fn list_matching_ports() -> Result<Vec<DockPort>, String> {
     let ports = serialport::available_ports().map_err(|e| e.to_string())?;
     let mut result = Vec::new();
@@ -168,7 +178,10 @@ async fn send_command_via_channel(
 ) -> Result<Value, String> {
     let tx = {
         let guard = state.command_tx.lock().map_err(|e| e.to_string())?;
-        guard.as_ref().cloned().ok_or("当前未连接底座")?
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| i18n_error("backend_errors.dock_not_connected"))?
     };
 
     let (response_tx, response_rx) = oneshot::channel();
@@ -181,8 +194,8 @@ async fn send_command_via_channel(
 
     match tokio::time::timeout(Duration::from_secs(timeout_secs), response_rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err("命令执行中途中断".to_string()),
-        Err(_) => Err("设备响应超时".to_string()),
+        Ok(Err(_)) => Err(i18n_error("backend_errors.command_interrupted")),
+        Err(_) => Err(i18n_error("backend_errors.device_timeout")),
     }
 }
 
@@ -211,7 +224,7 @@ fn spawn_serial_manager(
                 let _ = port.flush();
                 
                 if let Some(old_tx) = pending_command.take() {
-                    let _ = old_tx.send(Err("被新命令覆盖".to_string()));
+                    let _ = old_tx.send(Err(i18n_error("backend_errors.command_overridden")));
                 }
                 pending_command = Some(req.response_tx);
             }
@@ -263,7 +276,10 @@ fn spawn_serial_manager(
 fn parse_info_response(value: Value) -> Result<DockInfo, String> {
     match value.get("type").and_then(Value::as_str) {
         Some("info") => serde_json::from_value(value).map_err(|e| e.to_string()),
-        _ => Err(format!("设备返回的不是 info 响应。内容: {value}")),
+        _ => Err(i18n_error_with_params(
+            "backend_errors.unexpected_response",
+            json!({ "expected": "info", "value": value.to_string() }),
+        )),
     }
 }
 
@@ -273,14 +289,20 @@ fn parse_status_response(value: Value) -> Result<Vec<TrackerStatus>, String> {
             let parsed: StatusResponse = serde_json::from_value(value).map_err(|e| e.to_string())?;
             Ok(parsed.trackers)
         }
-        _ => Err(format!("设备返回的不是 status 响应。内容: {value}")),
+        _ => Err(i18n_error_with_params(
+            "backend_errors.unexpected_response",
+            json!({ "expected": "status", "value": value.to_string() }),
+        )),
     }
 }
 
 fn parse_ack_response(value: Value) -> Result<AckResponse, String> {
     match value.get("type").and_then(Value::as_str) {
         Some("ack") => serde_json::from_value(value).map_err(|e| e.to_string()),
-        _ => Err(format!("设备返回的不是 ack 响应。内容: {value}")),
+        _ => Err(i18n_error_with_params(
+            "backend_errors.unexpected_response",
+            json!({ "expected": "ack", "value": value.to_string() }),
+        )),
     }
 }
 
@@ -306,7 +328,7 @@ fn get_usb_location_paths(app_handle: &tauri::AppHandle) -> Result<Vec<UsbNode>,
     };
 
     if hdev == -1isize {
-        return Err("SetupDiGetClassDevsW 失败".to_string());
+        return Err(i18n_error("backend_errors.setupapi_failed"));
     }
 
     let mut index = 0;
@@ -642,13 +664,18 @@ async fn connect_dock(
         .iter()
         .find(|p| p.port_name == port_name)
         .cloned()
-        .ok_or_else(|| "未找到指定底座端口，请先刷新设备列表".to_string())?;
+        .ok_or_else(|| i18n_error("backend_errors.port_not_found"))?;
 
     // 1. 打开串口
     let port = serialport::new(&port_name, FOXDOCK_BAUD_RATE)
         .timeout(Duration::from_millis(100))
         .open()
-        .map_err(|e| format!("无法打开串口: {e}"))?;
+        .map_err(|e| {
+            i18n_error_with_params(
+                "backend_errors.open_serial_failed",
+                json!({ "error": e.to_string() }),
+            )
+        })?;
 
     // 针对 ESP32C3：不要主动设置 DTR/RTS，以免触发硬件重启进入烧录模式
     // 默认保持不操作，或者如果库默认设置了，尝试不操作它。
@@ -686,7 +713,10 @@ async fn connect_dock(
     }
     
     if !last_err.is_empty() {
-        return Err(format!("连接成功但无法获取初始状态: {}", last_err));
+        return Err(i18n_error_with_params(
+            "backend_errors.initial_status_failed",
+            json!({ "detail": last_err }),
+        ));
     }
 
     Ok(selected)
@@ -755,11 +785,11 @@ async fn control_tracker(
     tracker_id: u8,
 ) -> Result<AckResponse, String> {
     if !(1..=10).contains(&tracker_id) {
-        return Err("追踪器 ID 必须在 1 到 10 之间".to_string());
+        return Err(i18n_error("backend_errors.tracker_id_out_of_range"));
     }
 
     if !matches!(action.as_str(), "ret" | "bl" | "sleep" | "pair") {
-        return Err("不支持的单点控制动作".to_string());
+        return Err(i18n_error("backend_errors.unsupported_single_action"));
     }
 
     let timeout = get_action_timeout(&action);
@@ -780,7 +810,7 @@ async fn control_all(
     action: String,
 ) -> Result<AckResponse, String> {
     if !matches!(action.as_str(), "ret_all" | "bl_all" | "sleep_all" | "pair_all") {
-        return Err("不支持的全体控制动作".to_string());
+        return Err(i18n_error("backend_errors.unsupported_all_action"));
     }
 
     let timeout = get_action_timeout(&action);

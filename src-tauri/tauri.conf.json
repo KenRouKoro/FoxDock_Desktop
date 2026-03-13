@@ -12,9 +12,15 @@
   "app": {
     "windows": [
       {
-        "title": "foxdock-desktop",
-        "width": 800,
-        "height": 600
+        "title": "FoxDock Desktop",
+        "width": 480,
+        "height": 720,
+        "minWidth": 480,
+        "minHeight": 600,
+        "maxWidth": 480,
+        "resizable": true,
+        "decorations": false,
+        "shadow": false
       }
     ],
     "security": {

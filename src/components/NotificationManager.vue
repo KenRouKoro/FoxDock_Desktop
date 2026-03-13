@@ -29,12 +29,12 @@ defineProps<{
 <style scoped>
 .notification-container {
   position: fixed;
-  top: 20px;
-  right: 20px;
+  top: calc(var(--spacing-xl) + 36px);
+  right: var(--spacing-xl);
   z-index: 9999;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--spacing-sm);
   pointer-events: none;
 }
 
@@ -42,33 +42,33 @@ defineProps<{
   pointer-events: auto;
   min-width: 260px;
   max-width: 400px;
-  padding: 12px 16px;
-  background: #ffffff;
-  border: 2px solid #59a9ff;
-  box-shadow: 4px 4px 0px rgba(0, 0, 0, 0.1);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-bg-white);
+  border: var(--border-width) solid var(--color-secondary);
+  box-shadow: var(--box-shadow);
   display: flex;
   align-items: center;
   font-size: 14px;
 }
 
 .notification-item.info {
-  border-left: 6px solid #0078d4;
+  border-left: 6px solid var(--color-primary);
   background: #f3f9ff;
 }
 
 .notification-item.success {
-  border-left: 6px solid #107c10;
-  background: #f1faf1;
+  border-left: 6px solid var(--color-success);
+  background: var(--color-success-bg);
 }
 
 .notification-item.error {
-  border-left: 6px solid #d83b01;
-  background: #fff4f4;
+  border-left: 6px solid var(--color-error);
+  background: var(--color-error-bg);
 }
 
 .notification-content {
   flex: 1;
-  color: #12304f;
+  color: var(--color-text-main);
   word-break: break-all;
 }
 

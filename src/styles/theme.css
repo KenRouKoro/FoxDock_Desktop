@@ -1,0 +1,96 @@
+:root {
+  /* 颜色系统 - 基础 */
+  --color-primary: #0078d4;
+  --color-primary-hover: #106ebe;
+  --color-secondary: #59a9ff;
+  --color-secondary-hover: #d7ebff;
+  
+  /* 文本颜色 */
+  --color-text-main: #12304f;
+  --color-text-secondary: #184470;
+  --color-text-light: #2f5d8f;
+  --color-text-white: #ffffff;
+
+  /* 背景颜色 */
+  --color-bg-page: #e8f2ff;
+  --color-bg-panel: #f4faff;
+  --color-bg-header: #d7ebff;
+  --color-bg-white: #ffffff;
+  
+  /* 状态颜色 */
+  --color-success: #107c10;
+  --color-success-border: #2c8d5f;
+  --color-success-bg: #dff6ea;
+  --color-success-hover: #cff0df;
+  --color-error: #d83b01;
+  --color-error-bg: #fde7e9;
+  
+  /* 边框和阴影 */
+  --border-width: 2px;
+  --border-radius: 0px;
+  --border-color: var(--color-secondary);
+  --box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.1);
+  --box-shadow-heavy: 8px 8px 0 rgba(0, 0, 0, 0.2);
+
+  /* 字体 */
+  --font-family-main: "Segoe UI", Arial, sans-serif;
+  --font-family-mono: "Courier New", Courier, monospace;
+
+  /* 间距 */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 20px;
+
+  /* 窗口限制 */
+  --window-width: 480px;
+  --window-min-height: 600px;
+}
+
+/* 全局基础样式 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-page);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-secondary);
+  border-radius: 0px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-bg-page);
+  color: var(--color-text-main);
+  font-family: var(--font-family-main);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+button, select, input {
+  font-family: inherit;
+}
