@@ -12,7 +12,7 @@ dist
 dist-ssr
 *.local
 
-trae
+.trae
 API_SPEC.md
 project.md
 

@@ -1,85 +1,20 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, onBeforeUnmount, nextTick } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useI18n } from "vue-i18n";
 
-// --- 路由模拟 ---
-const searchParams = new URLSearchParams(window.location.search);
-const isDebugWindow = ref(searchParams.get("debug") === "true");
+// 导入组件
+import DebugConsole from "./components/DebugConsole.vue";
+import ConnectionPanel from "./components/ConnectionPanel.vue";
+import TrackerStatusComponent from "./components/TrackerStatus.vue";
+import TrackerControl from "./components/TrackerControl.vue";
+import NotificationManager from "./components/NotificationManager.vue";
 
-// --- Debug 页面数据 ---
-interface DebugLog {
-  direction: string;
-  content: string;
-  timestamp: string;
-}
+// 导入资源
+import logoUrl from "./assets/FoxApplication.png";
 
-const debugLogs = ref<DebugLog[]>([]);
-const logContainer = ref<HTMLElement | null>(null);
-let unlistenDebug: (() => void) | null = null;
-let unlistenDock: (() => void) | null = null;
-
-onMounted(async () => {
-  // 1. 串口调试日志监听
-  unlistenDebug = await listen<DebugLog>("serial-debug-log", (event) => {
-    if (isDebugWindow.value) {
-      const newLog = event.payload;
-      const lastLog = debugLogs.value[debugLogs.value.length - 1];
-
-      // 合并逻辑：如果方向相同，且距离上一条日志时间很短（例如小于 100ms），则合并显示
-      if (lastLog && lastLog.direction === newLog.direction) {
-        lastLog.content += newLog.content;
-        // 更新时间戳为最新的
-        lastLog.timestamp = newLog.timestamp;
-      } else {
-        debugLogs.value.push(newLog);
-      }
-
-      if (debugLogs.value.length > 2000) debugLogs.value.shift();
-      
-      nextTick(() => {
-        if (logContainer.value) {
-          logContainer.value.scrollTop = logContainer.value.scrollHeight;
-        }
-      });
-    }
-  });
-
-  // 2. 底座主动事件监听 (inserted, removed, boot)
-  unlistenDock = await listen<any>("dock-event", (event) => {
-    if (isDebugWindow.value) return; 
-    
-    const data = event.payload;
-    if (data.type === "event") {
-      if (data.event === "inserted" || data.event === "removed") {
-        const id = data.id;
-        const inserted = data.event === "inserted";
-        trackers.value = trackers.value.map(t => 
-          t.id === id ? { ...t, inserted } : t
-        );
-        pushLog(`[事件] 槽位 #${id} ${inserted ? "已插入" : "已拔出"}`);
-      } else if (data.event === "boot") {
-        pushLog(`[事件] 底座已重启: ${data.project} v${data.version}`);
-        void refreshTrackerStatus();
-      }
-    } else if (data.type === "status") {
-      trackers.value = normalizeTrackers(data.trackers);
-    }
-  });
-});
-
-onUnmounted(() => {
-  if (unlistenDebug) unlistenDebug();
-  if (unlistenDock) unlistenDock();
-});
-
-const clearLogs = () => {
-  debugLogs.value = [];
-};
-
-const openDebug = async () => {
-  await invoke("open_debug_window");
-};
+const { t, locale } = useI18n();
 
 // --- 类型定义 ---
 type DockPort = {
@@ -97,6 +32,13 @@ type DockInfo = {
 type TrackerStatus = {
   id: number;
   inserted: boolean;
+  usbPath?: string;
+};
+
+type UsbTopologyResult = {
+  id: number;
+  inserted: boolean;
+  usb_path?: string;
 };
 
 type AckResponse = {
@@ -105,57 +47,109 @@ type AckResponse = {
   msg?: string;
 };
 
+interface Notification {
+  id: number;
+  message: string;
+  type: 'info' | 'success' | 'error';
+  timestamp: number;
+}
+
+// --- 路由模拟 ---
+const searchParams = new URLSearchParams(window.location.search);
+const isDebugWindow = ref(searchParams.get("debug") === "true");
+
+// --- 状态定义 ---
 const docks = ref<DockPort[]>([]);
-const selectedPortName = ref("");
 const connectedPortName = ref("");
 const dockInfo = ref<DockInfo | null>(null);
 const trackers = ref<TrackerStatus[]>(
   Array.from({ length: 10 }, (_, index) => ({ id: index + 1, inserted: false })),
 );
-const selectedTrackerId = ref(1);
 const ledEnabled = ref(false);
 const loading = ref(false);
-const logs = ref<string[]>([]);
+const showOverlay = ref(false); // 控制全屏遮罩
+const elapsedTime = ref(0); // 当前已执行时间 (s)
+const estimatedTime = ref(0); // 预计总时间 (s)
+const notifications = ref<Notification[]>([]);
 
-// --- 状态定义 ---
-const singleActions = [
-  { label: "复位", value: "ret" },
-  { label: "Bootloader", value: "bl" },
-  { label: "休眠", value: "sleep" },
-  { label: "配对", value: "pair" },
-];
+// --- 指令延时定义 (s) ---
+const ACTION_DELAYS: Record<string, number> = {
+  'ret': 0.5,
+  'ret_all': 0.5,
+  'bl': 1.0,
+  'bl_all': 1.0,
+  'sleep': 1.5,
+  'sleep_all': 1.5,
+  'pair': 6.5,
+  'pair_all': 6.5,
+  'connect': 3.0 // 连接操作预估时间
+};
 
-const allActions = [
-  { label: "全部复位", value: "ret_all" },
-  { label: "全部 Bootloader", value: "bl_all" },
-  { label: "全部休眠", value: "sleep_all" },
-  { label: "全部配对", value: "pair_all" },
-];
+let nextNotifyId = 0;
+let overlayTimer: number | null = null;
+let connectionMonitorTimer: number | null = null;
 
-function getErrorMessage(error: unknown): string {
-  if (typeof error === "string") {
-    return error;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return "未知错误";
+function startOverlayTimer(action: string) {
+  elapsedTime.value = 0;
+  estimatedTime.value = ACTION_DELAYS[action] || 0;
+  showOverlay.value = true;
+  
+  const start = Date.now();
+  overlayTimer = window.setInterval(() => {
+    elapsedTime.value = (Date.now() - start) / 1000;
+  }, 100);
 }
 
-function pushLog(message: string): void {
-  const time = new Date().toLocaleTimeString();
-  logs.value.unshift(`[${time}] ${message}`);
-  if (logs.value.length > 12) {
-    logs.value = logs.value.slice(0, 12);
+function stopOverlayTimer() {
+  if (overlayTimer) {
+    clearInterval(overlayTimer);
+    overlayTimer = null;
   }
+  showOverlay.value = false;
+  elapsedTime.value = 0;
+  estimatedTime.value = 0;
+}
+let unlistenDock: (() => void) | null = null;
+
+// --- 通知逻辑 ---
+function addNotification(message: string, type: 'info' | 'success' | 'error' = 'info') {
+  const id = nextNotifyId++;
+  notifications.value.push({ id, message, type, timestamp: Date.now() });
+  setTimeout(() => {
+    notifications.value = notifications.value.filter(n => n.id !== id);
+  }, 5000);
+}
+
+function pushLog(message: string, type: 'info' | 'success' | 'error' = 'info'): void {
+  addNotification(message, type);
+}
+
+function resetConnectedState(): void {
+  connectedPortName.value = "";
+  dockInfo.value = null;
+  trackers.value = normalizeTrackers([]);
+  ledEnabled.value = false;
+}
+
+// --- 核心业务逻辑 ---
+function getErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return t('common.unknown_error');
 }
 
 function normalizeTrackers(current: TrackerStatus[]): TrackerStatus[] {
-  const map = new Map(current.map((item) => [item.id, item.inserted]));
-  return Array.from({ length: 10 }, (_, index) => ({
-    id: index + 1,
-    inserted: map.get(index + 1) ?? false,
-  }));
+  const map = new Map(current.map((item) => [item.id, item]));
+  return Array.from({ length: 10 }, (_, index) => {
+    const id = index + 1;
+    const existing = trackers.value.find(t => t.id === id);
+    const newData = map.get(id);
+    return {
+      id,
+      inserted: newData?.inserted ?? false,
+      usbPath: newData?.usbPath ?? existing?.usbPath
+    };
+  });
 }
 
 async function refreshDocks(): Promise<void> {
@@ -163,12 +157,9 @@ async function refreshDocks(): Promise<void> {
   try {
     const result = await invoke<DockPort[]>("discover_docks");
     docks.value = result;
-    if (!selectedPortName.value && result.length > 0) {
-      selectedPortName.value = result[0].portName;
-    }
-    pushLog(`扫描到 ${result.length} 个可用底座`);
+    pushLog(t('notifications.scan_found', { count: result.length }), 'info');
   } catch (error) {
-    pushLog(`扫描失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.scan_failed', { msg: getErrorMessage(error) }), 'error');
   } finally {
     loading.value = false;
   }
@@ -178,32 +169,33 @@ async function loadConnectedPort(): Promise<void> {
   try {
     const current = await invoke<string | null>("get_connected_port");
     connectedPortName.value = current ?? "";
-    if (connectedPortName.value) {
-      selectedPortName.value = connectedPortName.value;
-    }
   } catch (error) {
-    pushLog(`读取连接状态失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.status_read_failed', { msg: getErrorMessage(error) }), 'error');
   }
 }
 
-async function connectDock(): Promise<void> {
-  if (!selectedPortName.value) {
-    pushLog("请先选择底座端口");
+async function connectDock(portName: string): Promise<void> {
+  if (connectedPortName.value) {
+    pushLog(t('notifications.already_connected', { name: connectedPortName.value }), 'info');
+    return;
+  }
+  if (!portName) {
+    pushLog(t('notifications.select_port_first'), 'info');
     return;
   }
   loading.value = true;
+  startOverlayTimer('connect');
   try {
-    const dock = await invoke<DockPort>("connect_dock", {
-      portName: selectedPortName.value,
-    });
+    const dock = await invoke<DockPort>("connect_dock", { portName });
     connectedPortName.value = dock.portName;
-    pushLog(`已连接 ${dock.displayName}`);
+    pushLog(t('notifications.connect_success', { name: dock.displayName }), 'success');
     await refreshDockInfo();
     await refreshTrackerStatus();
   } catch (error) {
-    pushLog(`连接失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.connect_failed', { msg: getErrorMessage(error) }), 'error');
   } finally {
     loading.value = false;
+    stopOverlayTimer();
   }
 }
 
@@ -211,317 +203,288 @@ async function disconnectDock(): Promise<void> {
   loading.value = true;
   try {
     await invoke("disconnect_dock");
-    connectedPortName.value = "";
-    dockInfo.value = null;
-    trackers.value = normalizeTrackers([]);
-    ledEnabled.value = false;
-    pushLog("已断开连接");
+    resetConnectedState();
+    pushLog(t('notifications.disconnect_success'), 'info');
   } catch (error) {
-    pushLog(`断开失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.disconnect_failed', { msg: getErrorMessage(error) }), 'error');
   } finally {
     loading.value = false;
+  }
+}
+
+async function checkDockConnectionHealth(): Promise<void> {
+  if (!connectedPortName.value || loading.value) return;
+  try {
+    const connected = await invoke<boolean>("check_dock_connection");
+    if (!connected && connectedPortName.value) {
+      resetConnectedState();
+      pushLog(t('notifications.usb_disconnected'), 'error');
+    }
+  } catch {
   }
 }
 
 async function refreshDockInfo(): Promise<void> {
-  if (!connectedPortName.value) {
-    return;
-  }
+  if (!connectedPortName.value) return;
   try {
     dockInfo.value = await invoke<DockInfo>("get_dock_info");
   } catch (error) {
-    pushLog(`读取底座信息失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.info_read_failed', { msg: getErrorMessage(error) }), 'error');
   }
 }
 
 async function refreshTrackerStatus(): Promise<void> {
-  if (!connectedPortName.value) {
-    return;
-  }
+  if (!connectedPortName.value) return;
   try {
     const result = await invoke<TrackerStatus[]>("get_dock_status");
     trackers.value = normalizeTrackers(result);
+    // 在获取状态后，尝试进行一次 USB 拓扑扫描
+    console.log("[App] Triggering scan after status refresh");
+    await scanUsbTopology();
   } catch (error) {
-    pushLog(`读取追踪器状态失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.tracker_status_failed', { msg: getErrorMessage(error) }), 'error');
   }
 }
 
-async function runSingleAction(action: string): Promise<void> {
-  if (!connectedPortName.value) {
-    pushLog("请先连接底座");
+let scanTimeout: number | null = null;
+const EVENT_FLAP_WINDOW_MS = 2500;
+let topologyScanBlockedUntil = 0;
+const trackerLastEvent = new Map<number, { inserted: boolean; ts: number }>();
+
+function markTrackerEvent(id: number, inserted: boolean): void {
+  const now = Date.now();
+  const prev = trackerLastEvent.get(id);
+  if (prev && prev.inserted !== inserted && now - prev.ts <= EVENT_FLAP_WINDOW_MS) {
+    topologyScanBlockedUntil = Math.max(topologyScanBlockedUntil, now + EVENT_FLAP_WINDOW_MS);
+    console.log(`[USB] Scan blocked due to unstable events on slot ${id}`);
+    if (scanTimeout) {
+      clearTimeout(scanTimeout);
+      scanTimeout = null;
+    }
+  }
+  trackerLastEvent.set(id, { inserted, ts: now });
+}
+
+async function scanUsbTopology(): Promise<void> {
+  if (!connectedPortName.value) return;
+  if (Date.now() < topologyScanBlockedUntil) {
+    console.log("[USB] Scan skipped due to unstable insert/remove events.");
     return;
   }
+  
+  if (scanTimeout) {
+    console.log("[USB] Resetting scan timeout...");
+    clearTimeout(scanTimeout);
+  }
+
+  console.log("[USB] Scheduling scan in 2s...");
+  scanTimeout = window.setTimeout(async () => {
+    try {
+      if (Date.now() < topologyScanBlockedUntil) {
+        console.log("[USB] Scan canceled before execution due to unstable events.");
+        return;
+      }
+      console.log("[USB] Starting topology scan...");
+      const usbResults = await invoke<UsbTopologyResult[]>("scan_usb_topology");
+      console.log("[USB] Scan results:", usbResults);
+      
+      // 合并 USB 路径信息到当前的 trackers 状态中
+      trackers.value = trackers.value.map(t => {
+        const usbInfo = usbResults.find(u => u.id === t.id);
+        if (usbInfo) {
+          console.log(`[USB] Slot ${t.id} matched to path: ${usbInfo.usb_path}`);
+        }
+        return {
+          ...t,
+          usbPath: usbInfo?.usb_path ?? t.usbPath
+        };
+      });
+      console.log("[USB] Topology update complete.");
+    } catch (error) {
+      console.error("[USB] Topology scan failed:", error);
+    } finally {
+      scanTimeout = null;
+    }
+  }, 2000); // 延迟 2s 以等待 USB 握手
+}
+
+async function runSingleAction(action: string, trackerId: number): Promise<void> {
   loading.value = true;
+  startOverlayTimer(action);
   try {
-    const ack = await invoke<AckResponse>("control_tracker", {
-      action,
-      trackerId: selectedTrackerId.value,
-    });
+    const ack = await invoke<AckResponse>("control_tracker", { action, trackerId });
     if (ack.success) {
-      pushLog(`执行成功：${ack.cmd} #${selectedTrackerId.value}`);
+      pushLog(t('notifications.action_success', { cmd: ack.cmd, id: trackerId }), 'success');
       await refreshTrackerStatus();
     } else {
-      pushLog(`执行失败：${ack.msg ?? ack.cmd}`);
+      pushLog(t('notifications.action_failed', { msg: ack.msg ?? ack.cmd }), 'error');
     }
   } catch (error) {
-    pushLog(`执行失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.action_failed', { msg: getErrorMessage(error) }), 'error');
   } finally {
     loading.value = false;
+    stopOverlayTimer();
   }
 }
 
 async function runAllAction(action: string): Promise<void> {
-  if (!connectedPortName.value) {
-    pushLog("请先连接底座");
-    return;
-  }
   loading.value = true;
+  startOverlayTimer(action);
   try {
     const ack = await invoke<AckResponse>("control_all", { action });
     if (ack.success) {
-      pushLog(`执行成功：${ack.cmd}`);
+      pushLog(t('notifications.action_all_success', { cmd: ack.cmd }), 'success');
       await refreshTrackerStatus();
     } else {
-      pushLog(`执行失败：${ack.msg ?? ack.cmd}`);
+      pushLog(t('notifications.action_failed', { msg: ack.msg ?? ack.cmd }), 'error');
     }
   } catch (error) {
-    pushLog(`执行失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.action_failed', { msg: getErrorMessage(error) }), 'error');
   } finally {
     loading.value = false;
+    stopOverlayTimer();
   }
 }
 
 async function toggleLed(): Promise<void> {
-  if (!connectedPortName.value) {
-    pushLog("请先连接底座");
-    return;
-  }
   loading.value = true;
   try {
     const nextValue = !ledEnabled.value;
     const ack = await invoke<AckResponse>("set_dock_led", { enabled: nextValue });
     if (ack.success) {
       ledEnabled.value = nextValue;
-      pushLog(`底座 LED 已${nextValue ? "开启" : "关闭"}`);
+      pushLog(t('notifications.led_success', { status: nextValue ? t('common.on') : t('common.off') }), 'success');
     } else {
-      pushLog(`LED 控制失败：${ack.msg ?? ack.cmd}`);
+      pushLog(t('notifications.led_failed', { msg: ack.msg ?? ack.cmd }), 'error');
     }
   } catch (error) {
-    pushLog(`LED 控制失败：${getErrorMessage(error)}`);
+    pushLog(t('notifications.led_failed', { msg: getErrorMessage(error) }), 'error');
   } finally {
     loading.value = false;
   }
 }
 
+const openDebug = async () => {
+  await invoke("open_debug_window");
+};
+
+const toggleLocale = () => {
+  locale.value = locale.value === 'zh' ? 'en' : 'zh';
+};
+
+// --- 生命周期 ---
 onMounted(async () => {
+  // 1. 底座主动事件监听
+  unlistenDock = await listen<any>("dock-event", (event) => {
+    if (isDebugWindow.value) return; 
+    const data = event.payload;
+    if (data.type === "event") {
+      if (data.event === "inserted" || data.event === "removed") {
+        const id = data.id;
+        const inserted = data.event === "inserted";
+        markTrackerEvent(id, inserted);
+        trackers.value = trackers.value.map(t => t.id === id ? { ...t, inserted, usbPath: inserted ? t.usbPath : undefined } : t);
+        if (inserted) {
+          void scanUsbTopology();
+        }
+        const eventKey = inserted ? 'notifications.event_inserted' : 'notifications.event_removed';
+        pushLog(t(eventKey, { id }), 'info');
+      } else if (data.event === "boot") {
+        pushLog(t('notifications.event_boot', { project: data.project, version: data.version }), 'success');
+        void refreshTrackerStatus();
+      }
+    } else if (data.type === "status") {
+      trackers.value = normalizeTrackers(data.trackers);
+    }
+  });
+
   await refreshDocks();
   await loadConnectedPort();
   if (connectedPortName.value) {
     await refreshDockInfo();
     await refreshTrackerStatus();
   }
+  if (!isDebugWindow.value) {
+    connectionMonitorTimer = window.setInterval(() => {
+      void checkDockConnectionHealth();
+    }, 1500);
+  }
 });
 
-onBeforeUnmount(() => {
-  // 保持为空或移除，因为不再需要 statusTimer
+onUnmounted(() => {
+  if (unlistenDock) unlistenDock();
+  if (connectionMonitorTimer) {
+    clearInterval(connectionMonitorTimer);
+    connectionMonitorTimer = null;
+  }
 });
 </script>
 
 <template>
-  <main v-if="isDebugWindow" class="debug-container">
-    <header class="debug-header">
-      <span class="title">Serial Debug Console</span>
-      <button class="clear-btn" @click="clearLogs">Clear Logs</button>
-    </header>
-    <div ref="logContainer" class="log-list">
-      <div v-for="(log, index) in debugLogs" :key="index" class="log-item" :class="log.direction.toLowerCase()">
-        <span class="ts">[{{ log.timestamp }}]</span>
-        <span class="dir">{{ log.direction }}</span>
-        <pre class="content">{{ log.content }}</pre>
-      </div>
-    </div>
-  </main>
+  <DebugConsole v-if="isDebugWindow" />
 
   <main v-else class="page">
-    <header class="header">
-      <div class="header-bar">
-        <h1>FoxDock 桌面控制台</h1>
-        <button class="debug-btn" @click="openDebug">调试</button>
-      </div>
-      <p>10 槽位追踪器底座管理</p>
-    </header>
-
-    <section class="panel">
-      <h2>连接管理</h2>
-      <div class="row">
-        <select v-model="selectedPortName" :disabled="loading">
-          <option value="">请选择底座端口</option>
-          <option v-for="dock in docks" :key="dock.portName" :value="dock.portName">
-            {{ dock.displayName }}
-          </option>
-        </select>
-        <button :disabled="loading" @click="refreshDocks">刷新</button>
-        <button :disabled="loading || !selectedPortName" @click="connectDock">连接</button>
-        <button :disabled="loading || !connectedPortName" @click="disconnectDock">断开</button>
-      </div>
-      <p class="status">
-        当前连接：
-        <span v-if="connectedPortName">{{ connectedPortName }}</span>
-        <span v-else>未连接</span>
-      </p>
-      <div class="info-grid">
-        <div>项目：{{ dockInfo?.project ?? "-" }}</div>
-        <div>版本：{{ dockInfo?.version ?? "-" }}</div>
-        <div>MCU：{{ dockInfo?.mcu ?? "-" }}</div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>追踪器插入状态</h2>
-      <div class="tracker-column">
-        <div v-for="item in trackers" :key="item.id" class="tracker-cell" :class="{ inserted: item.inserted }">
-          <span>槽位 {{ item.id }}</span>
-          <span>{{ item.inserted ? "已插入" : "未插入" }}</span>
+    <!-- 全屏遮罩层 -->
+    <Teleport to="body">
+      <div v-if="showOverlay" class="loading-overlay">
+        <div class="loading-content">
+          <div class="spinner"></div>
+          <p>{{ t('common.processing') }}</p>
+          <div class="progress-info">
+            {{ t('common.execution_time', { elapsed: elapsedTime.toFixed(1), estimated: estimatedTime.toFixed(1) }) }}
+          </div>
+          <div class="progress-bar-container">
+            <div class="progress-bar" :style="{ width: Math.min((elapsedTime / estimatedTime) * 100, 100) + '%' }"></div>
+          </div>
         </div>
       </div>
-    </section>
+    </Teleport>
 
-    <section class="panel">
-      <h2>追踪器控制</h2>
-      <div class="row">
-        <label for="trackerId">槽位</label>
-        <select id="trackerId" v-model.number="selectedTrackerId" :disabled="loading">
-          <option v-for="id in 10" :key="id" :value="id">{{ id }}</option>
-        </select>
+    <header class="header">
+      <div class="header-bar">
+        <div class="header-title-area">
+          <img :src="logoUrl" class="logo" alt="FoxDock Logo" />
+          <h1>{{ t('app.title') }}</h1>
+        </div>
+        <div class="header-actions">
+          <button class="lang-btn" @click="toggleLocale">{{ locale === 'zh' ? 'English' : '中文' }}</button>
+          <button class="debug-btn" @click="openDebug">{{ t('app.debug_btn') }}</button>
+        </div>
       </div>
-      <div class="button-grid">
-        <button
-          v-for="item in singleActions"
-          :key="item.value"
-          :disabled="loading || !connectedPortName"
-          @click="runSingleAction(item.value)"
-        >
-          {{ item.label }}
-        </button>
-      </div>
-      <div class="button-grid">
-        <button
-          v-for="item in allActions"
-          :key="item.value"
-          :disabled="loading || !connectedPortName"
-          @click="runAllAction(item.value)"
-        >
-          {{ item.label }}
-        </button>
-      </div>
-      <div class="row">
-        <button :disabled="loading || !connectedPortName" @click="toggleLed">
-          底座 LED：{{ ledEnabled ? "开" : "关" }}
-        </button>
-        <button :disabled="loading || !connectedPortName" @click="refreshTrackerStatus">刷新状态</button>
-      </div>
-    </section>
+      <p>{{ t('app.subtitle') }}</p>
+    </header>
 
-    <section class="panel">
-      <h2>运行日志</h2>
-      <div class="log-list">
-        <div v-for="line in logs" :key="line" class="log-line">{{ line }}</div>
-      </div>
-    </section>
+    <ConnectionPanel 
+      :docks="docks"
+      :connected-port-name="connectedPortName"
+      :dock-info="dockInfo"
+      :loading="loading"
+      @refresh="refreshDocks"
+      @connect="connectDock"
+      @disconnect="disconnectDock"
+    />
+
+    <TrackerStatusComponent 
+      :trackers="trackers" 
+      :disabled="loading || !connectedPortName"
+      @run-single-action="runSingleAction"
+    />
+
+    <TrackerControl 
+      :connected-port-name="connectedPortName"
+      :loading="loading"
+      :led-enabled="ledEnabled"
+      @run-single-action="runSingleAction"
+      @run-all-action="runAllAction"
+      @toggle-led="toggleLed"
+      @refresh-status="refreshTrackerStatus"
+    />
+
+    <NotificationManager :notifications="notifications" />
   </main>
 </template>
 
 <style scoped>
-/* --- Metro UI & Debug Window Styles --- */
-.debug-container {
-  height: 100vh !important;
-  width: 100vw !important;
-  display: flex !important;
-  flex-direction: column !important;
-  background-color: #1e1e1e !important;
-  color: #d4d4d4 !important;
-  font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 12px;
-  position: fixed !important;
-  top: 0 !important;
-  left: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  z-index: 999999 !important;
-}
-
-.debug-header {
-  padding: 8px 16px;
-  background: #2d2d2d;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid #3e3e3e;
-  flex-shrink: 0;
-}
-
-.debug-header .title {
-  font-weight: bold;
-  color: #569cd6;
-}
-
-.clear-btn {
-  background: #3e3e3e;
-  color: white;
-  border: none;
-  padding: 4px 8px;
-  cursor: pointer;
-}
-
-.clear-btn:hover {
-  background: #505050;
-}
-
-.debug-container .log-list {
-  flex: 1 !important;
-  overflow-y: auto !important;
-  padding: 8px !important;
-  background-color: #1e1e1e !important;
-  display: block !important;
-}
-
-.log-item {
-  margin-bottom: 4px;
-  display: flex !important;
-  gap: 8px;
-  line-height: 1.4;
-  color: inherit;
-}
-
-.log-item.tx { color: #ce9178 !important; }
-.log-item.rx { color: #b5cea8 !important; }
-.log-item.test { color: #569cd6 !important; }
-
-.log-item .ts { color: #808080 !important; flex-shrink: 0; }
-.log-item .dir { font-weight: bold; width: 24px; flex-shrink: 0; }
-.log-item .content { margin: 0; white-space: pre-wrap; word-break: break-all; color: inherit; }
-
-.header-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.debug-btn {
-  background: #0078d4;
-  color: white;
-  border: none;
-  padding: 6px 12px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.debug-btn:hover {
-  background: #106ebe;
-}
-
 .page {
   min-height: 100vh;
   margin: 0;
@@ -548,98 +511,114 @@ onBeforeUnmount(() => {
   color: #2f5d8f;
 }
 
-.panel {
-  border: 2px solid #59a9ff;
-  background: #f4faff;
-  padding: 12px;
-  margin-bottom: 12px;
-}
-
-.panel h2 {
-  margin: 0 0 10px;
-  font-size: 18px;
-  color: #184470;
-}
-
-.row {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.status {
-  margin: 8px 0;
-}
-
-.info-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(140px, 1fr));
-  gap: 8px;
-}
-
-.tracker-column {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-}
-
-.tracker-cell {
-  border: 2px solid #77b8ff;
-  background: #eef7ff;
-  padding: 8px;
+.header-bar {
   display: flex;
   justify-content: space-between;
+  align-items: center;
 }
 
-.tracker-cell.inserted {
-  border-color: #2c8d5f;
-  background: #dff6ea;
+.header-title-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.button-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+.logo {
+  height: 40px;
+  width: auto;
+}
+
+.header-actions {
+  display: flex;
   gap: 8px;
-  margin-bottom: 10px;
 }
 
-.log-list {
-  border: 2px solid #77b8ff;
-  background: #eef7ff;
-  min-height: 80px;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.log-line {
-  padding: 6px 8px;
-  border-bottom: 1px solid #c6e2ff;
-  font-family: Consolas, "Courier New", monospace;
+.debug-btn, .lang-btn {
+  background: #0078d4;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  cursor: pointer;
   font-size: 12px;
 }
 
-select,
-button {
-  border: 2px solid #59a9ff;
-  border-radius: 0;
+.lang-btn {
   background: #ffffff;
-  color: #12304f;
-  padding: 6px 10px;
+  color: #0078d4;
+  border: 2px solid #0078d4;
+}
+
+.debug-btn:hover {
+  background: #106ebe;
+}
+
+.lang-btn:hover {
+  background: #f3f9ff;
+}
+
+/* 全屏遮罩样式 */
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+  backdrop-filter: blur(2px);
+}
+
+.loading-content {
+  background: white;
+  padding: 30px 50px;
+  border: 2px solid #0078d4;
+  box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.loading-content p {
+  margin: 0;
+  font-weight: bold;
+  color: #0078d4;
+  font-size: 16px;
+}
+
+.progress-info {
+  font-family: "Courier New", Courier, monospace;
   font-size: 14px;
+  color: #184470;
 }
 
-button {
-  cursor: pointer;
+.progress-bar-container {
+  width: 240px;
+  height: 8px;
+  background: #f0f0f0;
+  border: 1px solid #0078d4;
 }
 
-button:hover:enabled {
-  background: #d7ebff;
+.progress-bar {
+  height: 100%;
+  background: #0078d4;
+  transition: width 0.1s linear;
 }
 
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #0078d4;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 </style>

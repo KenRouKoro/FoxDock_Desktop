@@ -5,6 +5,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
+use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+    SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW, DIGCF_ALLCLASSES,
+    DIGCF_PRESENT, HDEVINFO, SP_DEVINFO_DATA, SPDRP_HARDWAREID, SPDRP_LOCATION_INFORMATION,
+    SPDRP_LOCATION_PATHS,
+};
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS};
 
 #[derive(Serialize, Clone)]
 struct DebugLog {
@@ -64,6 +71,7 @@ struct DockInfo {
 struct TrackerStatus {
     id: u8,
     inserted: bool,
+    usb_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -156,6 +164,7 @@ fn extract_first_json(buffer: &mut Vec<u8>) -> Option<Value> {
 async fn send_command_via_channel(
     state: &State<'_, DockConnectionState>,
     payload: Value,
+    timeout_secs: u64,
 ) -> Result<Value, String> {
     let tx = {
         let guard = state.command_tx.lock().map_err(|e| e.to_string())?;
@@ -170,7 +179,7 @@ async fn send_command_via_channel(
     .await
     .map_err(|e| e.to_string())?;
 
-    match tokio::time::timeout(Duration::from_secs(5), response_rx).await {
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), response_rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("命令执行中途中断".to_string()),
         Err(_) => Err("设备响应超时".to_string()),
@@ -275,9 +284,351 @@ fn parse_ack_response(value: Value) -> Result<AckResponse, String> {
     }
 }
 
+#[derive(Serialize, Clone)]
+struct UsbNode {
+    device_id: String,
+    vid: String,
+    pid: String,
+    location_path: Option<String>,
+    location_info: Option<String>,
+}
+
+fn get_usb_location_paths(app_handle: &tauri::AppHandle) -> Result<Vec<UsbNode>, String> {
+    emit_debug_log(app_handle, "USB", "Starting SetupAPI device scan...\n");
+    let mut nodes = Vec::new();
+    let hdev: HDEVINFO = unsafe {
+        SetupDiGetClassDevsW(
+            std::ptr::null(),
+            to_wide_null("USB").as_ptr(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_ALLCLASSES,
+        )
+    };
+
+    if hdev == -1isize {
+        return Err("SetupDiGetClassDevsW 失败".to_string());
+    }
+
+    let mut index = 0;
+    loop {
+        let mut devinfo = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ClassGuid: unsafe { std::mem::zeroed() },
+            DevInst: 0,
+            Reserved: 0,
+        };
+
+        let ok = unsafe { SetupDiEnumDeviceInfo(hdev, index, &mut devinfo) };
+        if ok == 0 {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+
+        let instance_id = get_device_instance_id(hdev, &mut devinfo);
+        let hardware_ids = get_registry_property_multi_sz(hdev, &mut devinfo, SPDRP_HARDWAREID);
+        let source = instance_id
+            .clone()
+            .or_else(|| hardware_ids.as_ref().and_then(|v| v.first().cloned()));
+        let Some(source_text) = source else {
+            continue;
+        };
+
+        if let Some((vid, pid)) = extract_vid_pid(&source_text) {
+            let location_path = get_registry_property_multi_sz(hdev, &mut devinfo, SPDRP_LOCATION_PATHS)
+                .and_then(|v| v.first().cloned());
+            let location_info =
+                get_registry_property_sz(hdev, &mut devinfo, SPDRP_LOCATION_INFORMATION);
+            emit_debug_log(
+                app_handle,
+                "USB",
+                &format!(
+                    "Node VID:PID {}:{}, path: {}, info: {}\n",
+                    vid,
+                    pid,
+                    location_path.as_deref().unwrap_or("-"),
+                    location_info.as_deref().unwrap_or("-")
+                ),
+            );
+            nodes.push(UsbNode {
+                device_id: instance_id.unwrap_or(source_text),
+                vid,
+                pid,
+                location_path,
+                location_info,
+            });
+        }
+    }
+    unsafe {
+        SetupDiDestroyDeviceInfoList(hdev);
+    }
+
+    emit_debug_log(app_handle, "USB", &format!("Parsed {} nodes with valid VID/PID.\n", nodes.len()));
+    Ok(nodes)
+}
+
+fn to_wide_null(input: &str) -> Vec<u16> {
+    let mut wide: Vec<u16> = input.encode_utf16().collect();
+    wide.push(0);
+    wide
+}
+
+fn bytes_to_u16_vec(raw: &[u8]) -> Vec<u16> {
+    raw.chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect()
+}
+
+fn parse_reg_sz(raw: &[u8]) -> Option<String> {
+    let mut data = bytes_to_u16_vec(raw);
+    while data.last().copied() == Some(0) {
+        data.pop();
+    }
+    if data.is_empty() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&data))
+}
+
+fn parse_reg_multi_sz(raw: &[u8]) -> Vec<String> {
+    let data = bytes_to_u16_vec(raw);
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (i, ch) in data.iter().enumerate() {
+        if *ch == 0 {
+            if i == start {
+                break;
+            }
+            parts.push(String::from_utf16_lossy(&data[start..i]));
+            start = i + 1;
+        }
+    }
+    parts
+}
+
+fn get_registry_property_raw(
+    hdev: HDEVINFO,
+    devinfo: &mut SP_DEVINFO_DATA,
+    property: u32,
+) -> Option<Vec<u8>> {
+    let mut required = 0u32;
+    let mut reg_type = 0u32;
+    unsafe {
+        let ok = SetupDiGetDeviceRegistryPropertyW(
+            hdev,
+            devinfo,
+            property,
+            &mut reg_type,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        );
+        if ok == 0 {
+            let code = GetLastError();
+            if code != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+                return None;
+            }
+        }
+        let mut buf = vec![0u8; required as usize];
+        let ok2 = SetupDiGetDeviceRegistryPropertyW(
+            hdev,
+            devinfo,
+            property,
+            &mut reg_type,
+            buf.as_mut_ptr(),
+            required,
+            &mut required,
+        );
+        if ok2 == 0 {
+            return None;
+        }
+        Some(buf)
+    }
+}
+
+fn get_registry_property_sz(
+    hdev: HDEVINFO,
+    devinfo: &mut SP_DEVINFO_DATA,
+    property: u32,
+) -> Option<String> {
+    get_registry_property_raw(hdev, devinfo, property).and_then(|raw| parse_reg_sz(&raw))
+}
+
+fn get_registry_property_multi_sz(
+    hdev: HDEVINFO,
+    devinfo: &mut SP_DEVINFO_DATA,
+    property: u32,
+) -> Option<Vec<String>> {
+    get_registry_property_raw(hdev, devinfo, property).map(|raw| parse_reg_multi_sz(&raw))
+}
+
+fn get_device_instance_id(hdev: HDEVINFO, devinfo: &mut SP_DEVINFO_DATA) -> Option<String> {
+    let mut required = 0u32;
+    unsafe {
+        let ok =
+            SetupDiGetDeviceInstanceIdW(hdev, devinfo, std::ptr::null_mut(), 0, &mut required);
+        if ok == 0 {
+            let code = GetLastError();
+            if code != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+                return None;
+            }
+        }
+        let mut buf = vec![0u16; required as usize + 1];
+        let ok2 = SetupDiGetDeviceInstanceIdW(
+            hdev,
+            devinfo,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut required,
+        );
+        if ok2 == 0 {
+            return None;
+        }
+        let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+}
+
+fn extract_vid_pid(device_id: &str) -> Option<(String, String)> {
+    // 例如: USB\VID_303A&PID_1001\6&19B86D40&0&1
+    let upper = device_id.to_uppercase();
+    let vid_start = upper.find("VID_")?;
+    let vid = upper[vid_start + 4..vid_start + 8].to_string();
+    let pid_start = upper.find("PID_")?;
+    let pid = upper[pid_start + 4..pid_start + 8].to_string();
+    Some((vid, pid))
+}
+
+fn remove_usbmi_suffix(path: &str) -> &str {
+    if let Some(idx) = path.find("#USBMI(") {
+        &path[..idx]
+    } else {
+        path
+    }
+}
+
+fn parse_relative_usb_ports(relative_path: &str) -> Vec<u8> {
+    let mut ports = Vec::new();
+    let mut remain = relative_path;
+    loop {
+        let Some(start) = remain.find("#USB(") else {
+            break;
+        };
+        let seg = &remain[start + 5..];
+        let Some(end) = seg.find(')') else {
+            break;
+        };
+        if let Ok(port) = seg[..end].parse::<u8>() {
+            ports.push(port);
+        }
+        remain = &seg[end + 1..];
+    }
+    ports
+}
+
+fn push_tracker_unique(list: &mut Vec<TrackerStatus>, item: TrackerStatus) {
+    if list.iter().any(|t| t.id == item.id) {
+        return;
+    }
+    list.push(item);
+}
+
+fn relative_ports_match(actual: &[u8], expected: &[u8]) -> bool {
+    actual.len() >= expected.len() && actual[..expected.len()] == *expected
+}
+
 #[tauri::command]
-fn discover_docks() -> Result<Vec<DockPort>, String> {
-    list_matching_ports()
+async fn scan_usb_topology(app_handle: tauri::AppHandle) -> Result<Vec<TrackerStatus>, String> {
+    let nodes = get_usb_location_paths(&app_handle)?;
+    
+    let base_node = nodes.iter().find(|n| n.vid == "303A" && n.pid == "1001");
+    
+    let mut tracker_info = Vec::new();
+    
+    if let Some(base) = base_node {
+        let base_path_clean = base.location_path.as_deref().map(remove_usbmi_suffix);
+        emit_debug_log(
+            &app_handle,
+            "USB",
+            &format!(
+                "Found Base (303A:1001), path: {}, info: {}\n",
+                base_path_clean.unwrap_or("-"),
+                base.location_info.as_deref().unwrap_or("-")
+            ),
+        );
+
+        if let Some(base_path) = base_path_clean {
+            if let Some(last_hash) = base_path.rfind('#') {
+                let primary_hub_path = &base_path[..last_hash];
+                emit_debug_log(&app_handle, "USB", &format!("Identified Primary HUB path: {}\n", primary_hub_path));
+                let slot_paths: [(u8, &str, &[u8]); 5] = [
+                    (1, "Hub1-P4", &[4]),
+                    (2, "Hub2-P1", &[3, 1]),
+                    (3, "Hub2-P2", &[3, 2]),
+                    (4, "Hub2-P3", &[3, 3]),
+                    (5, "Hub2-P4", &[3, 4]),
+                ];
+                emit_debug_log(
+                    &app_handle,
+                    "USB",
+                    "Using fixed slot topology: Hub1-P4, Hub2 behind Hub1-P3 (P1..P4 => Slot2..Slot5)\n",
+                );
+
+                for (slot_id, label, expected_ports) in slot_paths {
+                    let found = nodes.iter().any(|node| {
+                        let Some(path) = node.location_path.as_deref() else {
+                            return false;
+                        };
+                        let path_clean = remove_usbmi_suffix(path);
+                        if !path_clean.starts_with(primary_hub_path) {
+                            return false;
+                        }
+                        let relative_path = &path_clean[primary_hub_path.len()..];
+                        let ports = parse_relative_usb_ports(relative_path);
+                        relative_ports_match(&ports, expected_ports)
+                    });
+                    emit_debug_log(
+                        &app_handle,
+                        "USB",
+                        &format!(
+                            "Slot {} ({}) presence by address {:?}: {}\n",
+                            slot_id,
+                            label,
+                            expected_ports,
+                            if found { "found" } else { "not found" }
+                        ),
+                    );
+                    if found {
+                        push_tracker_unique(
+                            &mut tracker_info,
+                            TrackerStatus {
+                                id: slot_id,
+                                inserted: true,
+                                usb_path: Some(label.to_string()),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        if tracker_info.is_empty() {
+            emit_debug_log(
+                &app_handle,
+                "USB",
+                "No slot address matched in this scan.\n",
+            );
+        }
+    } else {
+        emit_debug_log(&app_handle, "USB", "Base device (303A:1001) not found in topology.\n");
+    }
+    
+    emit_debug_log(&app_handle, "USB", &format!("Scan complete. Found {} trackers on this dock.\n", tracker_info.len()));
+    Ok(tracker_info)
 }
 
 #[tauri::command]
@@ -323,7 +674,7 @@ async fn connect_dock(
         let wait_ms = if i == 0 { 1000 } else { 500 };
         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
         
-        match send_command_via_channel(&state, json!({ "cmd": "status" })).await {
+        match send_command_via_channel(&state, json!({ "cmd": "status" }), 5).await {
             Ok(_) => {
                 last_err.clear();
                 break;
@@ -356,10 +707,26 @@ fn get_connected_port(state: State<'_, DockConnectionState>) -> Result<Option<St
 }
 
 #[tauri::command]
+fn check_dock_connection(state: State<'_, DockConnectionState>) -> Result<bool, String> {
+    let connected = state.port_name.lock().map_err(|e| e.to_string())?.clone();
+    let Some(port_name) = connected else {
+        return Ok(false);
+    };
+    let alive = list_matching_ports()?.iter().any(|p| p.port_name == port_name);
+    if !alive {
+        let mut tx_guard = state.command_tx.lock().map_err(|e| e.to_string())?;
+        let mut name_guard = state.port_name.lock().map_err(|e| e.to_string())?;
+        *tx_guard = None;
+        *name_guard = None;
+    }
+    Ok(alive)
+}
+
+#[tauri::command]
 async fn get_dock_info(
     state: State<'_, DockConnectionState>,
 ) -> Result<DockInfo, String> {
-    let response = send_command_via_channel(&state, json!({ "cmd": "info" })).await?;
+    let response = send_command_via_channel(&state, json!({ "cmd": "info" }), 5).await?;
     parse_info_response(response)
 }
 
@@ -367,8 +734,18 @@ async fn get_dock_info(
 async fn get_dock_status(
     state: State<'_, DockConnectionState>,
 ) -> Result<Vec<TrackerStatus>, String> {
-    let response = send_command_via_channel(&state, json!({ "cmd": "status" })).await?;
+    let response = send_command_via_channel(&state, json!({ "cmd": "status" }), 5).await?;
     parse_status_response(response)
+}
+
+fn get_action_timeout(action: &str) -> u64 {
+    match action {
+        "ret" | "ret_all" => 4,       // 0.5s + 3s = 3.5s
+        "bl" | "bl_all" => 4,        // 1s + 3s = 4s
+        "sleep" | "sleep_all" => 5,   // 1.5s + 3s = 4.5s
+        "pair" | "pair_all" => 10,    // 6.5s + 3s = 9.5s
+        _ => 5,
+    }
 }
 
 #[tauri::command]
@@ -385,12 +762,14 @@ async fn control_tracker(
         return Err("不支持的单点控制动作".to_string());
     }
 
+    let timeout = get_action_timeout(&action);
     let response = send_command_via_channel(
         &state,
         json!({
             "cmd": action,
             "id": tracker_id
         }),
+        timeout,
     ).await?;
     parse_ack_response(response)
 }
@@ -404,7 +783,8 @@ async fn control_all(
         return Err("不支持的全体控制动作".to_string());
     }
 
-    let response = send_command_via_channel(&state, json!({ "cmd": action })).await?;
+    let timeout = get_action_timeout(&action);
+    let response = send_command_via_channel(&state, json!({ "cmd": action }), timeout).await?;
     parse_ack_response(response)
 }
 
@@ -419,6 +799,7 @@ async fn set_dock_led(
             "cmd": "led",
             "state": if enabled { 1 } else { 0 }
         }),
+        5,
     ).await?;
     parse_ack_response(response)
 }
@@ -450,6 +831,11 @@ async fn open_debug_window(app_handle: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn discover_docks() -> Result<Vec<DockPort>, String> {
+    list_matching_ports()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -460,12 +846,14 @@ pub fn run() {
             connect_dock,
             disconnect_dock,
             get_connected_port,
+            check_dock_connection,
             get_dock_info,
             get_dock_status,
             control_tracker,
             control_all,
             set_dock_led,
-            open_debug_window
+            open_debug_window,
+            scan_usb_topology
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
