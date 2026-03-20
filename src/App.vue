@@ -1,21 +1,17 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { computed, ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 
 // 导入组件
-import DebugConsole from "./components/DebugConsole.vue";
-import ConnectionPanel from "./components/ConnectionPanel.vue";
-import TrackerStatusComponent from "./components/TrackerStatus.vue";
-import TrackerControl from "./components/TrackerControl.vue";
+import Home from "./views/Home.vue";
+import TrackerFlashing from "./views/TrackerFlashing.vue";
+import Settings from "./views/Settings.vue";
 import NotificationManager from "./components/NotificationManager.vue";
-import BaseButton from "./components/ui/BaseButton.vue";
 import BaseSpinner from "./components/ui/BaseSpinner.vue";
 import WindowTitleBar from "./components/ui/WindowTitleBar.vue";
-
-// 导入资源
-import logoUrl from "./assets/FoxApplication.png";
+import DebugConsole from "./components/DebugConsole.vue";
 
 const { t, locale } = useI18n();
 
@@ -30,6 +26,7 @@ type DockInfo = {
   project: string;
   version: string;
   mcu: string;
+  extra?: Record<string, unknown>;
 };
 
 type TrackerStatus = {
@@ -50,6 +47,22 @@ type AckResponse = {
   msg?: string;
 };
 
+type DockStatusResponse = {
+  led?: boolean;
+  bl_mode?: number;
+  auto_sleep?: boolean;
+  trackers: TrackerStatus[];
+};
+
+type BlModeResponse = {
+  mode: number;
+  name?: string;
+};
+
+type AutoSleepResponse = {
+  enabled: boolean;
+};
+
 interface Notification {
   id: number;
   message: string;
@@ -57,9 +70,10 @@ interface Notification {
   timestamp: number;
 }
 
-// --- 路由模拟 ---
+// --- 路由与视图控制 ---
 const searchParams = new URLSearchParams(window.location.search);
 const isDebugWindow = ref(searchParams.get("debug") === "true");
+const currentView = ref<'home' | 'flashing' | 'settings'>('home');
 
 // --- 状态定义 ---
 const docks = ref<DockPort[]>([]);
@@ -74,6 +88,14 @@ const showOverlay = ref(false); // 控制全屏遮罩
 const elapsedTime = ref(0); // 当前已执行时间 (s)
 const estimatedTime = ref(0); // 预计总时间 (s)
 const notifications = ref<Notification[]>([]);
+const blMode = ref<number | null>(null);
+const blModeName = ref("");
+const autoSleepEnabled = ref(false);
+const blModeOptions = computed(() => [
+  { mode: 0, label: t("tracker_control.bl_mode_option_0") },
+  { mode: 1, label: t("tracker_control.bl_mode_option_1") },
+  { mode: 2, label: t("tracker_control.bl_mode_option_2") },
+]);
 
 // --- 指令延时定义 (s) ---
 const ACTION_DELAYS: Record<string, number> = {
@@ -133,6 +155,9 @@ function resetConnectedState(): void {
   dockInfo.value = null;
   trackers.value = normalizeTrackers([]);
   ledEnabled.value = false;
+  blMode.value = null;
+  blModeName.value = "";
+  autoSleepEnabled.value = false;
 }
 
 function resolveBackendI18nMessage(raw: string): string | null {
@@ -227,6 +252,8 @@ async function connectDock(portName: string): Promise<void> {
     pushLog(t('notifications.connect_success', { name: dock.displayName }), 'success');
     await refreshDockInfo();
     await refreshTrackerStatus();
+    await refreshBlMode();
+    await refreshAutoSleep();
   } catch (error) {
     pushLog(t('notifications.connect_failed', { msg: getErrorMessage(error) }), 'error');
   } finally {
@@ -272,13 +299,41 @@ async function refreshDockInfo(): Promise<void> {
 async function refreshTrackerStatus(): Promise<void> {
   if (!connectedPortName.value) return;
   try {
-    const result = await invoke<TrackerStatus[]>("get_dock_status");
-    trackers.value = normalizeTrackers(result);
-    // 在获取状态后，尝试进行一次 USB 拓扑扫描
-    console.log("[App] Triggering scan after status refresh");
+    const result = await invoke<DockStatusResponse>("get_dock_status");
+    trackers.value = normalizeTrackers(result.trackers);
+    if (typeof result.led === "boolean") {
+      ledEnabled.value = result.led;
+    }
+    if (typeof result.bl_mode === "number") {
+      blMode.value = result.bl_mode;
+    }
+    if (typeof result.auto_sleep === "boolean") {
+      autoSleepEnabled.value = result.auto_sleep;
+    }
     await scanUsbTopology();
   } catch (error) {
     pushLog(t('notifications.tracker_status_failed', { msg: getErrorMessage(error) }), 'error');
+  }
+}
+
+async function refreshBlMode(): Promise<void> {
+  if (!connectedPortName.value) return;
+  try {
+    const result = await invoke<BlModeResponse>("get_bl_mode");
+    blMode.value = result.mode;
+    blModeName.value = result.name ?? "";
+  } catch (error) {
+    pushLog(t('notifications.bl_mode_read_failed', { msg: getErrorMessage(error) }), 'error');
+  }
+}
+
+async function refreshAutoSleep(): Promise<void> {
+  if (!connectedPortName.value) return;
+  try {
+    const result = await invoke<AutoSleepResponse>("get_auto_sleep");
+    autoSleepEnabled.value = result.enabled;
+  } catch (error) {
+    pushLog(t('notifications.auto_sleep_read_failed', { msg: getErrorMessage(error) }), 'error');
   }
 }
 
@@ -292,7 +347,6 @@ function markTrackerEvent(id: number, inserted: boolean): void {
   const prev = trackerLastEvent.get(id);
   if (prev && prev.inserted !== inserted && now - prev.ts <= EVENT_FLAP_WINDOW_MS) {
     topologyScanBlockedUntil = Math.max(topologyScanBlockedUntil, now + EVENT_FLAP_WINDOW_MS);
-    console.log(`[USB] Scan blocked due to unstable events on slot ${id}`);
     if (scanTimeout) {
       clearTimeout(scanTimeout);
       scanTimeout = null;
@@ -303,45 +357,26 @@ function markTrackerEvent(id: number, inserted: boolean): void {
 
 async function scanUsbTopology(): Promise<void> {
   if (!connectedPortName.value) return;
-  if (Date.now() < topologyScanBlockedUntil) {
-    console.log("[USB] Scan skipped due to unstable insert/remove events.");
-    return;
-  }
-  
-  if (scanTimeout) {
-    console.log("[USB] Resetting scan timeout...");
-    clearTimeout(scanTimeout);
-  }
+  if (Date.now() < topologyScanBlockedUntil) return;
+  if (scanTimeout) clearTimeout(scanTimeout);
 
-  console.log("[USB] Scheduling scan in 2s...");
   scanTimeout = window.setTimeout(async () => {
     try {
-      if (Date.now() < topologyScanBlockedUntil) {
-        console.log("[USB] Scan canceled before execution due to unstable events.");
-        return;
-      }
-      console.log("[USB] Starting topology scan...");
+      if (Date.now() < topologyScanBlockedUntil) return;
       const usbResults = await invoke<UsbTopologyResult[]>("scan_usb_topology");
-      console.log("[USB] Scan results:", usbResults);
-      
-      // 合并 USB 路径信息到当前的 trackers 状态中
       trackers.value = trackers.value.map(t => {
         const usbInfo = usbResults.find(u => u.id === t.id);
-        if (usbInfo) {
-          console.log(`[USB] Slot ${t.id} matched to path: ${usbInfo.usb_path}`);
-        }
         return {
           ...t,
           usbPath: usbInfo?.usb_path ?? t.usbPath
         };
       });
-      console.log("[USB] Topology update complete.");
     } catch (error) {
       console.error("[USB] Topology scan failed:", error);
     } finally {
       scanTimeout = null;
     }
-  }, 2000); // 延迟 2s 以等待 USB 握手
+  }, 2000);
 }
 
 async function runSingleAction(action: string, trackerId: number): Promise<void> {
@@ -400,6 +435,46 @@ async function toggleLed(): Promise<void> {
   }
 }
 
+async function setBlMode(mode: number): Promise<void> {
+  loading.value = true;
+  try {
+    const ack = await invoke<AckResponse>("set_bl_mode", { mode });
+    if (ack.success) {
+      await refreshBlMode();
+      pushLog(
+        t('notifications.bl_mode_set_success', { mode: blMode.value ?? mode, name: blModeName.value || "-" }),
+        'success',
+      );
+    } else {
+      pushLog(t('notifications.bl_mode_set_failed', { msg: ack.msg ?? ack.cmd }), 'error');
+    }
+  } catch (error) {
+    pushLog(t('notifications.bl_mode_set_failed', { msg: getErrorMessage(error) }), 'error');
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function setAutoSleep(enabled: boolean): Promise<void> {
+  loading.value = true;
+  try {
+    const ack = await invoke<AckResponse>("set_auto_sleep", { enabled });
+    if (ack.success) {
+      autoSleepEnabled.value = enabled;
+      pushLog(
+        t('notifications.auto_sleep_set_success', { status: enabled ? t('common.on') : t('common.off') }),
+        'success',
+      );
+    } else {
+      pushLog(t('notifications.auto_sleep_set_failed', { msg: ack.msg ?? ack.cmd }), 'error');
+    }
+  } catch (error) {
+    pushLog(t('notifications.auto_sleep_set_failed', { msg: getErrorMessage(error) }), 'error');
+  } finally {
+    loading.value = false;
+  }
+}
+
 const openDebug = async () => {
   await invoke("open_debug_window");
 };
@@ -410,7 +485,6 @@ const toggleLocale = () => {
 
 // --- 生命周期 ---
 onMounted(async () => {
-  // 1. 底座主动事件监听
   unlistenDock = await listen<any>("dock-event", (event) => {
     if (isDebugWindow.value) return; 
     const data = event.payload;
@@ -430,7 +504,15 @@ onMounted(async () => {
         void refreshTrackerStatus();
       }
     } else if (data.type === "status") {
-      trackers.value = normalizeTrackers(data.trackers);
+      trackers.value = normalizeTrackers(data.trackers ?? []);
+      if (typeof data.led === "boolean") ledEnabled.value = data.led;
+      if (typeof data.bl_mode === "number") blMode.value = data.bl_mode;
+      if (typeof data.auto_sleep === "boolean") autoSleepEnabled.value = data.auto_sleep;
+    } else if (data.type === "bl_mode") {
+      if (typeof data.mode === "number") blMode.value = data.mode;
+      if (typeof data.name === "string") blModeName.value = data.name;
+    } else if (data.type === "auto_sleep") {
+      if (typeof data.enabled === "boolean") autoSleepEnabled.value = data.enabled;
     }
   });
 
@@ -439,6 +521,8 @@ onMounted(async () => {
   if (connectedPortName.value) {
     await refreshDockInfo();
     await refreshTrackerStatus();
+    await refreshBlMode();
+    await refreshAutoSleep();
   }
   if (!isDebugWindow.value) {
     connectionMonitorTimer = window.setInterval(() => {
@@ -479,54 +563,60 @@ onUnmounted(() => {
     </Teleport>
 
     <div class="main-content">
-      <header class="header">
-      <div class="header-bar">
-        <div class="header-title-area">
-          <img :src="logoUrl" class="logo" alt="FoxDock Logo" />
-          <div class="header-text">
-            <h1>{{ t('app.title') }}</h1>
-            <p>{{ t('app.subtitle') }}</p>
-          </div>
-        </div>
-        <div class="header-actions">
-          <BaseButton variant="outline" @click="toggleLocale">
-            {{ locale === 'zh' ? 'EN' : '中' }}
-          </BaseButton>
-          <BaseButton variant="debug" @click="openDebug">
-            {{ t('app.debug_btn') }}
-          </BaseButton>
-        </div>
-      </div>
-    </header>
+      <Home 
+        v-if="currentView === 'home'"
+        :docks="docks"
+        :connected-port-name="connectedPortName"
+        :dock-info="dockInfo"
+        :trackers="trackers"
+        :led-enabled="ledEnabled"
+        :loading="loading"
+        :bl-mode="blMode"
+        :bl-mode-name="blModeName"
+        :auto-sleep-enabled="autoSleepEnabled"
+        :bl-mode-options="blModeOptions"
+        @refresh-docks="refreshDocks"
+        @connect-dock="connectDock"
+        @disconnect-dock="disconnectDock"
+        @run-single-action="runSingleAction"
+        @run-all-action="runAllAction"
+        @toggle-led="toggleLed"
+        @refresh-status="refreshTrackerStatus"
+        @set-bl-mode="setBlMode"
+        @set-auto-sleep="setAutoSleep"
+        @toggle-locale="toggleLocale"
+        @open-debug="openDebug"
+      />
+      <TrackerFlashing v-else-if="currentView === 'flashing'" />
+      <Settings v-else-if="currentView === 'settings'" />
+    </div>
 
-    <ConnectionPanel 
-      :docks="docks"
-      :connected-port-name="connectedPortName"
-      :dock-info="dockInfo"
-      :loading="loading"
-      @refresh="refreshDocks"
-      @connect="connectDock"
-      @disconnect="disconnectDock"
-    />
-
-    <TrackerStatusComponent 
-      :trackers="trackers" 
-      :disabled="loading || !connectedPortName"
-      @run-single-action="runSingleAction"
-    />
-
-    <TrackerControl 
-      :connected-port-name="connectedPortName"
-      :loading="loading"
-      :led-enabled="ledEnabled"
-      @run-single-action="runSingleAction"
-      @run-all-action="runAllAction"
-      @toggle-led="toggleLed"
-      @refresh-status="refreshTrackerStatus"
-    />
+    <!-- 底部任务栏 -->
+    <nav class="taskbar">
+      <button 
+        class="task-item" 
+        :class="{ active: currentView === 'home' }"
+        @click="currentView = 'home'"
+      >
+        <span class="task-label">{{ t('nav.home') }}</span>
+      </button>
+      <button 
+        class="task-item" 
+        :class="{ active: currentView === 'flashing' }"
+        @click="currentView = 'flashing'"
+      >
+        <span class="task-label">{{ t('nav.flashing') }}</span>
+      </button>
+      <button 
+        class="task-item" 
+        :class="{ active: currentView === 'settings' }"
+        @click="currentView = 'settings'"
+      >
+        <span class="task-label">{{ t('nav.settings') }}</span>
+      </button>
+    </nav>
 
     <NotificationManager :notifications="notifications" />
-    </div>
   </main>
 </template>
 
@@ -549,50 +639,50 @@ onUnmounted(() => {
   padding: var(--spacing-md);
   overflow-y: auto;
   scrollbar-gutter: stable;
+  margin-bottom: 2px; /* For the taskbar separation */
 }
 
-.header {
-  margin-bottom: var(--spacing-md);
-  border: var(--border-width) solid var(--color-secondary);
+/* 任务栏样式 */
+.taskbar {
+  display: flex;
   background: var(--color-bg-header);
-  padding: var(--spacing-sm) var(--spacing-md);
+  border-top: var(--border-width) solid var(--color-secondary);
+  height: 48px; /* Reduced height for text-only */
+  padding: 0;
 }
 
-.header-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.header-title-area {
+.task-item {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
-}
-
-.logo {
-  height: 32px;
-  width: auto;
-}
-
-.header-text h1 {
-  margin: 0;
-  font-size: 16px;
-  line-height: 1.2;
-}
-
-.header-text p {
-  margin: 0;
-  font-size: 11px;
+  justify-content: center;
+  border: none;
+  background: transparent;
   color: var(--color-text-light);
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 0;
+  border-bottom: 4px solid transparent;
+  height: 100%;
 }
 
-.header-actions {
-  display: flex;
-  gap: var(--spacing-xs);
+.task-item:hover {
+  background: var(--color-secondary-hover);
+  color: var(--color-primary);
 }
 
-/* 全屏遮罩样式 */
+.task-item.active {
+  background: var(--color-bg-white);
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+.task-label {
+  font-size: 14px; /* Slightly larger text */
+  font-weight: bold;
+}
+
+/* 其他样式保留 */
 .loading-overlay {
   position: fixed;
   top: 0;

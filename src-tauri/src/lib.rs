@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serialport::SerialPortType;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
@@ -62,9 +63,14 @@ struct DockPort {
 
 #[derive(Serialize, Deserialize)]
 struct DockInfo {
+    #[serde(default)]
     project: String,
+    #[serde(default)]
     version: String,
+    #[serde(default)]
     mcu: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -76,7 +82,21 @@ struct TrackerStatus {
 
 #[derive(Serialize, Deserialize)]
 struct StatusResponse {
+    led: Option<bool>,
+    bl_mode: Option<u8>,
+    auto_sleep: Option<bool>,
     trackers: Vec<TrackerStatus>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BlModeResponse {
+    mode: u8,
+    name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AutoSleepResponse {
+    enabled: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -84,6 +104,14 @@ struct AckResponse {
     cmd: String,
     success: bool,
     msg: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppVersionInfo {
+    app_name: String,
+    app_version: String,
+    protocol_version: String,
 }
 
 const I18N_ERROR_PREFIX: &str = "i18n:";
@@ -230,7 +258,10 @@ fn spawn_serial_manager(
             }
 
             // 检查 channel 是否已关闭（断开连接时）
-            if command_rx.is_closed() && pending_command.is_none() {
+            if command_rx.is_closed() {
+                if let Some(tx) = pending_command.take() {
+                    let _ = tx.send(Err(i18n_error("backend_errors.command_interrupted")));
+                }
                 break;
             }
 
@@ -283,12 +314,9 @@ fn parse_info_response(value: Value) -> Result<DockInfo, String> {
     }
 }
 
-fn parse_status_response(value: Value) -> Result<Vec<TrackerStatus>, String> {
+fn parse_status_response(value: Value) -> Result<StatusResponse, String> {
     match value.get("type").and_then(Value::as_str) {
-        Some("status") => {
-            let parsed: StatusResponse = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            Ok(parsed.trackers)
-        }
+        Some("status") => serde_json::from_value(value).map_err(|e| e.to_string()),
         _ => Err(i18n_error_with_params(
             "backend_errors.unexpected_response",
             json!({ "expected": "status", "value": value.to_string() }),
@@ -302,6 +330,26 @@ fn parse_ack_response(value: Value) -> Result<AckResponse, String> {
         _ => Err(i18n_error_with_params(
             "backend_errors.unexpected_response",
             json!({ "expected": "ack", "value": value.to_string() }),
+        )),
+    }
+}
+
+fn parse_bl_mode_response(value: Value) -> Result<BlModeResponse, String> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("bl_mode") => serde_json::from_value(value).map_err(|e| e.to_string()),
+        _ => Err(i18n_error_with_params(
+            "backend_errors.unexpected_response",
+            json!({ "expected": "bl_mode", "value": value.to_string() }),
+        )),
+    }
+}
+
+fn parse_auto_sleep_response(value: Value) -> Result<AutoSleepResponse, String> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("auto_sleep") => serde_json::from_value(value).map_err(|e| e.to_string()),
+        _ => Err(i18n_error_with_params(
+            "backend_errors.unexpected_response",
+            json!({ "expected": "auto_sleep", "value": value.to_string() }),
         )),
     }
 }
@@ -763,9 +811,59 @@ async fn get_dock_info(
 #[tauri::command]
 async fn get_dock_status(
     state: State<'_, DockConnectionState>,
-) -> Result<Vec<TrackerStatus>, String> {
+) -> Result<StatusResponse, String> {
     let response = send_command_via_channel(&state, json!({ "cmd": "status" }), 5).await?;
     parse_status_response(response)
+}
+
+#[tauri::command]
+async fn get_bl_mode(
+    state: State<'_, DockConnectionState>,
+) -> Result<BlModeResponse, String> {
+    let response = send_command_via_channel(&state, json!({ "cmd": "get_bl_mode" }), 5).await?;
+    parse_bl_mode_response(response)
+}
+
+#[tauri::command]
+async fn set_bl_mode(
+    state: State<'_, DockConnectionState>,
+    mode: u8,
+) -> Result<AckResponse, String> {
+    let response = send_command_via_channel(
+        &state,
+        json!({
+            "cmd": "set_bl_mode",
+            "mode": mode
+        }),
+        5,
+    )
+    .await?;
+    parse_ack_response(response)
+}
+
+#[tauri::command]
+async fn get_auto_sleep(
+    state: State<'_, DockConnectionState>,
+) -> Result<AutoSleepResponse, String> {
+    let response = send_command_via_channel(&state, json!({ "cmd": "get_auto_sleep" }), 5).await?;
+    parse_auto_sleep_response(response)
+}
+
+#[tauri::command]
+async fn set_auto_sleep(
+    state: State<'_, DockConnectionState>,
+    enabled: bool,
+) -> Result<AckResponse, String> {
+    let response = send_command_via_channel(
+        &state,
+        json!({
+            "cmd": "set_auto_sleep",
+            "state": if enabled { 1 } else { 0 }
+        }),
+        5,
+    )
+    .await?;
+    parse_ack_response(response)
 }
 
 fn get_action_timeout(action: &str) -> u64 {
@@ -773,6 +871,7 @@ fn get_action_timeout(action: &str) -> u64 {
         "ret" | "ret_all" => 4,       // 0.5s + 3s = 3.5s
         "bl" | "bl_all" => 4,        // 1s + 3s = 4s
         "sleep" | "sleep_all" => 5,   // 1.5s + 3s = 4.5s
+        "wake_up" | "wake_up_all" => 4,
         "pair" | "pair_all" => 10,    // 6.5s + 3s = 9.5s
         _ => 5,
     }
@@ -788,7 +887,7 @@ async fn control_tracker(
         return Err(i18n_error("backend_errors.tracker_id_out_of_range"));
     }
 
-    if !matches!(action.as_str(), "ret" | "bl" | "sleep" | "pair") {
+    if !matches!(action.as_str(), "ret" | "bl" | "sleep" | "pair" | "wake_up") {
         return Err(i18n_error("backend_errors.unsupported_single_action"));
     }
 
@@ -809,7 +908,10 @@ async fn control_all(
     state: State<'_, DockConnectionState>,
     action: String,
 ) -> Result<AckResponse, String> {
-    if !matches!(action.as_str(), "ret_all" | "bl_all" | "sleep_all" | "pair_all") {
+    if !matches!(
+        action.as_str(),
+        "ret_all" | "bl_all" | "sleep_all" | "pair_all" | "wake_up_all"
+    ) {
         return Err(i18n_error("backend_errors.unsupported_all_action"));
     }
 
@@ -866,6 +968,16 @@ fn discover_docks() -> Result<Vec<DockPort>, String> {
     list_matching_ports()
 }
 
+#[tauri::command]
+fn get_app_version(app_handle: tauri::AppHandle) -> AppVersionInfo {
+    let package_info = app_handle.package_info();
+    AppVersionInfo {
+        app_name: package_info.name.clone(),
+        app_version: package_info.version.to_string(),
+        protocol_version: "1.0.0".to_string(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -879,11 +991,16 @@ pub fn run() {
             check_dock_connection,
             get_dock_info,
             get_dock_status,
+            get_bl_mode,
+            set_bl_mode,
+            get_auto_sleep,
+            set_auto_sleep,
             control_tracker,
             control_all,
             set_dock_led,
             open_debug_window,
-            scan_usb_topology
+            scan_usb_topology,
+            get_app_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

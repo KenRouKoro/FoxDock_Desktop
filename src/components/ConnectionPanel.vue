@@ -17,6 +17,7 @@ type DockInfo = {
   project: string;
   version: string;
   mcu: string;
+  extra?: Record<string, unknown>;
 };
 
 const props = defineProps<{
@@ -67,6 +68,9 @@ watch(
       <div>{{ t('connection.project') }} {{ dockInfo?.project ?? "-" }}</div>
       <div>{{ t('connection.version') }} {{ dockInfo?.version ?? "-" }}</div>
       <div>{{ t('connection.mcu') }} {{ dockInfo?.mcu ?? "-" }}</div>
+      <div v-for="(value, key) in (dockInfo?.extra ?? {})" :key="key">
+        {{ key }}: {{ typeof value === "object" ? JSON.stringify(value) : value }}
+      </div>
     </div>
   </BasePanel>
 </template>

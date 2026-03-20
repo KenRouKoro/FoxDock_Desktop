@@ -16,7 +16,13 @@ export default {
   app: {
     title: "FoxDock 桌面控制台",
     subtitle: "FoxSnack追踪器底座",
-    debug_btn: "调试"
+    debug_btn: "调试",
+    info_btn: "信息",
+    info_title: "版本信息",
+    app_name: "应用名称",
+    app_version: "应用版本",
+    protocol_version: "协议版本",
+    close_btn: "关闭"
   },
   connection: {
     title: "连接管理",
@@ -36,19 +42,44 @@ export default {
   },
   tracker_control: {
     title: "追踪器控制",
+    single_section: "单个追踪器控制",
+    all_section: "全部追踪器控制",
+    dock_section: "底座设置",
     slot_label: "槽位",
     led_label: "底座 LED：",
+    auto_sleep_label: "插入自动休眠：",
     refresh_status: "刷新状态",
+    bl_mode_label: "BL 启动方式",
+    set_bl_mode: "设置 BL 方式",
+    current_bl_mode: "当前方式: {mode} ({name})",
+    bl_mode_option_0: "双击 RST",
+    bl_mode_option_1: "RST + 4 次 CSW",
+    bl_mode_option_2: "RST + 8 次 CSW",
     actions: {
       ret: "复位",
       bl: "Bootloader",
+      wake_up: "唤醒",
       sleep: "休眠",
       pair: "配对",
       ret_all: "全部复位",
       bl_all: "全部 Bootloader",
+      wake_up_all: "全部唤醒",
       sleep_all: "全部休眠",
       pair_all: "全部配对"
     }
+  },
+  nav: {
+    home: "首页",
+    flashing: "刷机",
+    settings: "设置"
+  },
+  flashing: {
+    title: "追踪器刷机",
+    placeholder: "刷机功能开发中..."
+  },
+  settings: {
+    title: "设置",
+    placeholder: "设置功能开发中..."
   },
   notifications: {
     scan_found: "扫描到 {count} 个可用底座",
@@ -63,11 +94,18 @@ export default {
     usb_disconnected: "检测到底座 USB 已断开，连接状态已重置",
     info_read_failed: "读取底座信息失败：{msg}",
     tracker_status_failed: "读取追踪器状态失败：{msg}",
+    bl_mode_read_failed: "读取 BL 启动方式失败：{msg}",
+    bl_mode_set_success: "BL 启动方式已设置为 {mode} ({name})",
+    bl_mode_set_failed: "设置 BL 启动方式失败：{msg}",
+    auto_sleep_read_failed: "读取自动休眠状态失败：{msg}",
+    auto_sleep_set_success: "插入自动休眠已设置为 {status}",
+    auto_sleep_set_failed: "设置插入自动休眠失败：{msg}",
     action_success: "执行成功：{cmd} #{id}",
     action_all_success: "执行成功：{cmd}",
     action_failed: "执行失败：{msg}",
     led_success: "底座 LED 已{status}",
     led_failed: "LED 控制失败：{msg}",
+    version_read_failed: "读取版本信息失败：{msg}",
     event_inserted: "[事件] 槽位 #{id} 已插入",
     event_removed: "[事件] 槽位 #{id} 已拔出",
     event_boot: "[事件] 底座已重启: {project} v{version}"
