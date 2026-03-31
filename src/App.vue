@@ -63,6 +63,57 @@ type AutoSleepResponse = {
   enabled: boolean;
 };
 
+type FirmwarePhase =
+  | "idle"
+  | "ready"
+  | "entering_bl"
+  | "waiting_bootloader"
+  | "copying"
+  | "verifying"
+  | "success"
+  | "error";
+
+type FirmwareMode = "manual" | "auto_slot" | "batch_all";
+
+type FirmwareRunState =
+  | "idle"
+  | "waiting"
+  | "queued"
+  | "running"
+  | "success"
+  | "warning"
+  | "skipped"
+  | "error";
+
+type FirmwareRunItem = {
+  state: FirmwareRunState;
+  message: string;
+};
+
+type FirmwareFile = {
+  name: string;
+  size: number;
+  bytes: Uint8Array;
+};
+
+type FirmwareProgressEvent = {
+  trackerId: number;
+  phase: FirmwarePhase;
+  progress: number;
+  message: string;
+};
+
+type FirmwareFlashResult = {
+  trackerId: number;
+  success: boolean;
+  warning: boolean;
+  phase: FirmwarePhase;
+  progress: number;
+  message: string;
+  fileName: string;
+  drivePath?: string;
+};
+
 interface Notification {
   id: number;
   message: string;
@@ -91,11 +142,39 @@ const notifications = ref<Notification[]>([]);
 const blMode = ref<number | null>(null);
 const blModeName = ref("");
 const autoSleepEnabled = ref(false);
+const firmwareBusy = ref(false);
+const firmwareTrackerId = ref(1);
+const firmwareFile = ref<FirmwareFile | null>(null);
+const firmwarePhase = ref<FirmwarePhase>("idle");
+const firmwareProgress = ref(0);
+const firmwareStatusMessage = ref(t("flashing.idle_status"));
+const firmwareMode = ref<FirmwareMode>("manual");
+const autoUpdateEnabled = ref(false);
+const autoPendingTrackerId = ref<number | null>(null);
+const activeFirmwareTrackerId = ref<number | null>(null);
+const firmwareRunItems = ref<Record<number, FirmwareRunItem>>(createFirmwareRunItems());
 const blModeOptions = computed(() => [
   { mode: 0, label: t("tracker_control.bl_mode_option_0") },
   { mode: 1, label: t("tracker_control.bl_mode_option_1") },
-  { mode: 2, label: t("tracker_control.bl_mode_option_2") },
 ]);
+const uiBusy = computed(() => loading.value || firmwareBusy.value);
+const selectedFirmwareTracker = computed(
+  () => trackers.value.find((tracker) => tracker.id === firmwareTrackerId.value) ?? null,
+);
+const firmwareSlotStatuses = computed(() =>
+  Array.from({ length: 5 }, (_, index) => {
+    const id = index + 1;
+    const tracker = trackers.value.find((item) => item.id === id);
+    const runItem = firmwareRunItems.value[id];
+    return {
+      id,
+      inserted: tracker?.inserted ?? false,
+      usbPath: tracker?.usbPath ?? "",
+      state: runItem?.state ?? "idle",
+      message: runItem?.message ?? t("flashing.slot_state_idle"),
+    };
+  }),
+);
 
 // --- 指令延时定义 (s) ---
 const ACTION_DELAYS: Record<string, number> = {
@@ -136,6 +215,7 @@ function stopOverlayTimer() {
   estimatedTime.value = 0;
 }
 let unlistenDock: (() => void) | null = null;
+let unlistenFirmware: (() => void) | null = null;
 
 // --- 通知逻辑 ---
 function addNotification(message: string, type: 'info' | 'success' | 'error' = 'info') {
@@ -158,6 +238,7 @@ function resetConnectedState(): void {
   blMode.value = null;
   blModeName.value = "";
   autoSleepEnabled.value = false;
+  resetFirmwareState({ keepFile: true });
 }
 
 function resolveBackendI18nMessage(raw: string): string | null {
@@ -197,6 +278,67 @@ function getErrorMessage(error: unknown): string {
     return resolveBackendI18nMessage(rawMessage) ?? rawMessage;
   }
   return t('common.unknown_error');
+}
+
+function resolveMessage(raw: string): string {
+  return resolveBackendI18nMessage(raw) ?? raw;
+}
+
+function createFirmwareRunItems(): Record<number, FirmwareRunItem> {
+  return Object.fromEntries(
+    Array.from({ length: 5 }, (_, index) => [
+      index + 1,
+      { state: "idle", message: t("flashing.slot_state_idle") },
+    ]),
+  ) as Record<number, FirmwareRunItem>;
+}
+
+function resetFirmwareRunItems(): void {
+  firmwareRunItems.value = createFirmwareRunItems();
+}
+
+function setFirmwareRunItem(id: number, state: FirmwareRunState, message: string): void {
+  if (id < 1 || id > 5) return;
+  firmwareRunItems.value = {
+    ...firmwareRunItems.value,
+    [id]: { state, message },
+  };
+}
+
+function getTrackerById(id: number): TrackerStatus | undefined {
+  return trackers.value.find((tracker) => tracker.id === id);
+}
+
+function armAutoUpdateWaitingState(): void {
+  autoPendingTrackerId.value = null;
+  resetFirmwareRunItems();
+  if (firmwareMode.value === "auto_slot" && autoUpdateEnabled.value) {
+    const message = t("flashing.auto_armed_status", { id: firmwareTrackerId.value });
+    setFirmwareRunItem(firmwareTrackerId.value, "waiting", message);
+    firmwareProgress.value = 0;
+    firmwarePhase.value = firmwareFile.value ? "ready" : "idle";
+    firmwareStatusMessage.value = message;
+  }
+}
+
+function resetFirmwareState(options: { keepFile?: boolean } = {}): void {
+  if (!options.keepFile) {
+    firmwareFile.value = null;
+  }
+  firmwareBusy.value = false;
+  firmwareMode.value = "manual";
+  autoUpdateEnabled.value = false;
+  autoPendingTrackerId.value = null;
+  activeFirmwareTrackerId.value = null;
+  resetFirmwareRunItems();
+  firmwareProgress.value = 0;
+  if (options.keepFile && firmwareFile.value) {
+    firmwarePhase.value = "ready";
+    firmwareStatusMessage.value = t("flashing.file_loaded_status", { name: firmwareFile.value.name });
+  } else {
+    firmwarePhase.value = "idle";
+    firmwareStatusMessage.value = t("flashing.idle_status");
+  }
 }
 
 function normalizeTrackers(current: TrackerStatus[]): TrackerStatus[] {
@@ -276,7 +418,7 @@ async function disconnectDock(): Promise<void> {
 }
 
 async function checkDockConnectionHealth(): Promise<void> {
-  if (!connectedPortName.value || loading.value) return;
+  if (!connectedPortName.value || loading.value || firmwareBusy.value) return;
   try {
     const connected = await invoke<boolean>("check_dock_connection");
     if (!connected && connectedPortName.value) {
@@ -371,12 +513,255 @@ async function scanUsbTopology(): Promise<void> {
           usbPath: usbInfo?.usb_path ?? t.usbPath
         };
       });
+      void maybeTriggerAutoFirmwareUpdate();
     } catch (error) {
       console.error("[USB] Topology scan failed:", error);
     } finally {
       scanTimeout = null;
     }
   }, 2000);
+}
+
+function setFirmwareMode(mode: FirmwareMode): void {
+  if (firmwareBusy.value) return;
+  firmwareMode.value = mode;
+  activeFirmwareTrackerId.value = null;
+  autoPendingTrackerId.value = null;
+  resetFirmwareRunItems();
+  if (mode !== "auto_slot") {
+    autoUpdateEnabled.value = false;
+  }
+  firmwareProgress.value = 0;
+  firmwarePhase.value = firmwareFile.value ? "ready" : "idle";
+  firmwareStatusMessage.value = firmwareFile.value
+    ? t("flashing.file_loaded_status", { name: firmwareFile.value.name })
+    : t("flashing.idle_status");
+}
+
+function setFirmwareTrackerId(id: number): void {
+  firmwareTrackerId.value = Math.min(5, Math.max(1, id));
+  if (firmwareMode.value === "auto_slot" && autoUpdateEnabled.value) {
+    armAutoUpdateWaitingState();
+  } else if (!firmwareBusy.value) {
+    resetFirmwareRunItems();
+  }
+}
+
+async function selectFirmwareFile(file: File | null): Promise<void> {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".uf2")) {
+    firmwareFile.value = null;
+    firmwarePhase.value = "error";
+    firmwareProgress.value = 0;
+    firmwareStatusMessage.value = t("flashing.invalid_file_type");
+    pushLog(t("flashing.invalid_file_type"), "error");
+    return;
+  }
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.length === 0) {
+      firmwareFile.value = null;
+      firmwarePhase.value = "error";
+      firmwareProgress.value = 0;
+      firmwareStatusMessage.value = t("flashing.empty_file");
+      pushLog(t("flashing.empty_file"), "error");
+      return;
+    }
+    firmwareFile.value = {
+      name: file.name,
+      size: file.size,
+      bytes,
+    };
+    resetFirmwareRunItems();
+    firmwarePhase.value = "ready";
+    firmwareProgress.value = 0;
+    firmwareStatusMessage.value = t("flashing.file_loaded_status", { name: file.name });
+    if (firmwareMode.value === "auto_slot" && autoUpdateEnabled.value) {
+      armAutoUpdateWaitingState();
+    }
+    pushLog(t("flashing.file_loaded_status", { name: file.name }), "success");
+  } catch (error) {
+    const message = getErrorMessage(error);
+    firmwareFile.value = null;
+    firmwarePhase.value = "error";
+    firmwareProgress.value = 0;
+    firmwareStatusMessage.value = message;
+    pushLog(message, "error");
+  }
+}
+
+async function runFirmwareFlashForTracker(trackerId: number): Promise<FirmwareFlashResult> {
+  if (!connectedPortName.value) {
+    throw new Error(t("flashing.require_connection"));
+  }
+  if (!firmwareFile.value) {
+    throw new Error(t("flashing.require_file"));
+  }
+  const tracker = getTrackerById(trackerId);
+  if (!tracker?.inserted) {
+    throw new Error(t("flashing.require_inserted_tracker", { id: trackerId }));
+  }
+
+  firmwareBusy.value = true;
+  activeFirmwareTrackerId.value = trackerId;
+  firmwarePhase.value = "entering_bl";
+  firmwareProgress.value = 0;
+  firmwareStatusMessage.value = t("flashing.progress_entering_bl", { id: trackerId });
+  setFirmwareRunItem(trackerId, "running", firmwareStatusMessage.value);
+
+  try {
+    const result = await invoke<FirmwareFlashResult>("flash_tracker_firmware", {
+      trackerId,
+      fileName: firmwareFile.value.name,
+      fileData: Array.from(firmwareFile.value.bytes),
+    });
+    const message = resolveMessage(result.message);
+    firmwarePhase.value = result.phase;
+    firmwareProgress.value = result.progress;
+    firmwareStatusMessage.value = message;
+    setFirmwareRunItem(trackerId, result.warning ? "warning" : "success", message);
+    pushLog(message, result.warning ? "info" : "success");
+    return result;
+  } catch (error) {
+    const message = getErrorMessage(error);
+    firmwarePhase.value = "error";
+    firmwareStatusMessage.value = message;
+    setFirmwareRunItem(trackerId, "error", message);
+    pushLog(message, "error");
+    throw error;
+  } finally {
+    firmwareBusy.value = false;
+    activeFirmwareTrackerId.value = null;
+    await refreshTrackerStatus();
+  }
+}
+
+async function startFirmwareFlash(): Promise<void> {
+  if (firmwareBusy.value) return;
+  resetFirmwareRunItems();
+  try {
+    await runFirmwareFlashForTracker(firmwareTrackerId.value);
+  } catch {
+  }
+}
+
+async function toggleAutoUpdate(): Promise<void> {
+  if (firmwareBusy.value) return;
+  if (autoUpdateEnabled.value) {
+    autoUpdateEnabled.value = false;
+    autoPendingTrackerId.value = null;
+    resetFirmwareRunItems();
+    firmwareProgress.value = 0;
+    firmwarePhase.value = firmwareFile.value ? "ready" : "idle";
+    firmwareStatusMessage.value = t("flashing.auto_disabled_status");
+    pushLog(firmwareStatusMessage.value, "info");
+    return;
+  }
+  if (!connectedPortName.value) {
+    pushLog(t("flashing.require_connection"), "error");
+    return;
+  }
+  if (!firmwareFile.value) {
+    pushLog(t("flashing.require_file"), "error");
+    return;
+  }
+  autoUpdateEnabled.value = true;
+  armAutoUpdateWaitingState();
+  pushLog(firmwareStatusMessage.value, "info");
+}
+
+async function maybeTriggerAutoFirmwareUpdate(): Promise<void> {
+  const trackerId = autoPendingTrackerId.value;
+  if (
+    trackerId === null ||
+    firmwareMode.value !== "auto_slot" ||
+    !autoUpdateEnabled.value ||
+    firmwareBusy.value ||
+    !connectedPortName.value ||
+    !firmwareFile.value
+  ) {
+    return;
+  }
+  const tracker = getTrackerById(trackerId);
+  if (!tracker?.inserted) {
+    armAutoUpdateWaitingState();
+    return;
+  }
+  if (!tracker.usbPath) {
+    return;
+  }
+
+  autoPendingTrackerId.value = null;
+  const queuedMessage = t("flashing.auto_triggered_status", { id: trackerId, path: tracker.usbPath });
+  setFirmwareRunItem(trackerId, "queued", queuedMessage);
+  firmwareStatusMessage.value = queuedMessage;
+  pushLog(queuedMessage, "info");
+
+  try {
+    await runFirmwareFlashForTracker(trackerId);
+  } catch {
+  } finally {
+    if (firmwareMode.value === "auto_slot" && autoUpdateEnabled.value && !firmwareBusy.value) {
+      armAutoUpdateWaitingState();
+    }
+  }
+}
+
+async function startBatchFirmwareFlash(): Promise<void> {
+  if (firmwareBusy.value) return;
+  if (!connectedPortName.value) {
+    pushLog(t("flashing.require_connection"), "error");
+    return;
+  }
+  if (!firmwareFile.value) {
+    pushLog(t("flashing.require_file"), "error");
+    return;
+  }
+
+  autoUpdateEnabled.value = false;
+  autoPendingTrackerId.value = null;
+  resetFirmwareRunItems();
+  firmwareProgress.value = 0;
+  firmwarePhase.value = "ready";
+
+  await refreshTrackerStatus();
+
+  const insertedTrackers = firmwareSlotStatuses.value.filter((tracker) => tracker.inserted).map((tracker) => tracker.id);
+  if (!insertedTrackers.length) {
+    firmwareStatusMessage.value = t("flashing.batch_no_targets_status");
+    pushLog(firmwareStatusMessage.value, "info");
+    return;
+  }
+
+  for (const tracker of firmwareSlotStatuses.value) {
+    if (tracker.inserted) {
+      setFirmwareRunItem(tracker.id, "queued", t("flashing.batch_queued_status", { id: tracker.id }));
+    } else {
+      setFirmwareRunItem(tracker.id, "skipped", t("flashing.batch_skipped_status", { id: tracker.id }));
+    }
+  }
+
+  for (const trackerId of insertedTrackers) {
+    const queueMessage = t("flashing.batch_running_status", { id: trackerId });
+    firmwareStatusMessage.value = queueMessage;
+    setFirmwareRunItem(trackerId, "queued", queueMessage);
+    try {
+      await runFirmwareFlashForTracker(trackerId);
+    } catch (error) {
+      const message = t("flashing.batch_stopped_status", {
+        id: trackerId,
+        msg: getErrorMessage(error),
+      });
+      firmwareStatusMessage.value = message;
+      pushLog(message, "error");
+      return;
+    }
+  }
+
+  firmwarePhase.value = "success";
+  firmwareProgress.value = 100;
+  firmwareStatusMessage.value = t("flashing.batch_completed_status");
+  pushLog(firmwareStatusMessage.value, "success");
 }
 
 async function runSingleAction(action: string, trackerId: number): Promise<void> {
@@ -495,7 +880,27 @@ onMounted(async () => {
         markTrackerEvent(id, inserted);
         trackers.value = trackers.value.map(t => t.id === id ? { ...t, inserted, usbPath: inserted ? t.usbPath : undefined } : t);
         if (inserted) {
+          if (
+            firmwareMode.value === "auto_slot" &&
+            autoUpdateEnabled.value &&
+            id === firmwareTrackerId.value &&
+            !firmwareBusy.value &&
+            firmwareFile.value
+          ) {
+            autoPendingTrackerId.value = id;
+            const message = t("flashing.auto_waiting_topology_status", { id });
+            setFirmwareRunItem(id, "queued", message);
+            firmwareStatusMessage.value = message;
+            pushLog(message, "info");
+          }
           void scanUsbTopology();
+        } else if (
+          firmwareMode.value === "auto_slot" &&
+          autoUpdateEnabled.value &&
+          id === firmwareTrackerId.value &&
+          !firmwareBusy.value
+        ) {
+          armAutoUpdateWaitingState();
         }
         const eventKey = inserted ? 'notifications.event_inserted' : 'notifications.event_removed';
         pushLog(t(eventKey, { id }), 'info');
@@ -515,6 +920,16 @@ onMounted(async () => {
       if (typeof data.enabled === "boolean") autoSleepEnabled.value = data.enabled;
     }
   });
+  unlistenFirmware = await listen<FirmwareProgressEvent>("firmware-progress", (event) => {
+    if (isDebugWindow.value) return;
+    const data = event.payload;
+    const activeTrackerId = activeFirmwareTrackerId.value ?? firmwareTrackerId.value;
+    if (data.trackerId !== activeTrackerId) return;
+    firmwarePhase.value = data.phase;
+    firmwareProgress.value = data.progress;
+    firmwareStatusMessage.value = resolveMessage(data.message);
+    setFirmwareRunItem(data.trackerId, "running", firmwareStatusMessage.value);
+  });
 
   await refreshDocks();
   await loadConnectedPort();
@@ -533,6 +948,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (unlistenDock) unlistenDock();
+  if (unlistenFirmware) unlistenFirmware();
   if (connectionMonitorTimer) {
     clearInterval(connectionMonitorTimer);
     connectionMonitorTimer = null;
@@ -570,7 +986,7 @@ onUnmounted(() => {
         :dock-info="dockInfo"
         :trackers="trackers"
         :led-enabled="ledEnabled"
-        :loading="loading"
+        :loading="uiBusy"
         :bl-mode="blMode"
         :bl-mode-name="blModeName"
         :auto-sleep-enabled="autoSleepEnabled"
@@ -587,7 +1003,32 @@ onUnmounted(() => {
         @toggle-locale="toggleLocale"
         @open-debug="openDebug"
       />
-      <TrackerFlashing v-else-if="currentView === 'flashing'" />
+      <TrackerFlashing
+        v-else-if="currentView === 'flashing'"
+        :connected-port-name="connectedPortName"
+        :trackers="trackers"
+        :loading="loading"
+        :busy="firmwareBusy"
+        :mode="firmwareMode"
+        :auto-update-enabled="autoUpdateEnabled"
+        :selected-tracker-id="firmwareTrackerId"
+        :selected-tracker-inserted="selectedFirmwareTracker?.inserted ?? false"
+        :selected-tracker-usb-path="selectedFirmwareTracker?.usbPath ?? ''"
+        :file-name="firmwareFile?.name ?? ''"
+        :file-size="firmwareFile?.size ?? 0"
+        :active-tracker-id="activeFirmwareTrackerId ?? 0"
+        :phase="firmwarePhase"
+        :progress="firmwareProgress"
+        :status-message="firmwareStatusMessage"
+        :slot-statuses="firmwareSlotStatuses"
+        @set-mode="setFirmwareMode"
+        @set-tracker-id="setFirmwareTrackerId"
+        @select-file="selectFirmwareFile"
+        @start-flash="startFirmwareFlash"
+        @toggle-auto-update="toggleAutoUpdate"
+        @start-batch-flash="startBatchFirmwareFlash"
+        @refresh-status="refreshTrackerStatus"
+      />
       <Settings v-else-if="currentView === 'settings'" />
     </div>
 

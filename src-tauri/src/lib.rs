@@ -1,11 +1,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serialport::SerialPortType;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW, DIGCF_ALLCLASSES,
@@ -13,6 +19,9 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SPDRP_LOCATION_PATHS,
 };
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+};
 
 #[derive(Serialize, Clone)]
 struct DebugLog {
@@ -33,24 +42,74 @@ fn emit_debug_log(app_handle: &tauri::AppHandle, direction: &str, content: &str)
 const FOXDOCK_VID: u16 = 0x303A;
 const FOXDOCK_PID: u16 = 0x1001;
 const FOXDOCK_BAUD_RATE: u32 = 115_200;
+const DRIVE_TYPE_NO_ROOT_DIR: u32 = 1;
+const DRIVE_TYPE_REMOVABLE: u32 = 2;
+const DRIVE_TYPE_FIXED: u32 = 3;
+const FLASHABLE_SLOT_IDS: std::ops::RangeInclusive<u8> = 1..=5;
+const SLOT_PATHS: [(u8, &str, &[u8]); 5] = [
+    (1, "Hub1-P4", &[4]),
+    (2, "Hub2-P1", &[3, 1]),
+    (3, "Hub2-P2", &[3, 2]),
+    (4, "Hub2-P3", &[3, 3]),
+    (5, "Hub2-P4", &[3, 4]),
+];
 
 struct CommandRequest {
     payload: Value,
     response_tx: oneshot::Sender<Result<Value, String>>,
 }
 
+struct DockConnectionRuntime {
+    port_name: String,
+    command_tx: mpsc::Sender<CommandRequest>,
+    shutdown_tx: std_mpsc::Sender<()>,
+    thread_handle: JoinHandle<()>,
+}
+
 struct DockConnectionState {
-    command_tx: Mutex<Option<mpsc::Sender<CommandRequest>>>,
-    port_name: Mutex<Option<String>>,
+    runtime: Mutex<Option<DockConnectionRuntime>>,
+    command_guard: AsyncMutex<()>,
 }
 
 impl Default for DockConnectionState {
     fn default() -> Self {
         Self {
-            command_tx: Mutex::new(None),
-            port_name: Mutex::new(None),
+            runtime: Mutex::new(None),
+            command_guard: AsyncMutex::new(()),
         }
     }
+}
+
+struct FirmwareJobState {
+    busy: AtomicBool,
+}
+
+impl Default for FirmwareJobState {
+    fn default() -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+        }
+    }
+}
+
+struct FirmwareJobGuard<'a> {
+    busy: &'a AtomicBool,
+}
+
+impl Drop for FirmwareJobGuard<'_> {
+    fn drop(&mut self) {
+        self.busy.store(false, Ordering::Release);
+    }
+}
+
+fn lock_firmware_job<'a>(
+    state: &'a State<'a, FirmwareJobState>,
+) -> Result<FirmwareJobGuard<'a>, String> {
+    state
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| i18n_error("backend_errors.firmware_job_busy"))?;
+    Ok(FirmwareJobGuard { busy: &state.busy })
 }
 
 #[derive(Serialize, Clone)]
@@ -111,7 +170,28 @@ struct AckResponse {
 struct AppVersionInfo {
     app_name: String,
     app_version: String,
-    protocol_version: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FirmwareProgressEvent {
+    tracker_id: u8,
+    phase: String,
+    progress: u8,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FirmwareFlashResult {
+    tracker_id: u8,
+    success: bool,
+    warning: bool,
+    phase: String,
+    progress: u8,
+    message: String,
+    file_name: String,
+    drive_path: Option<String>,
 }
 
 const I18N_ERROR_PREFIX: &str = "i18n:";
@@ -122,6 +202,24 @@ fn i18n_error(key: &str) -> String {
 
 fn i18n_error_with_params(key: &str, params: Value) -> String {
     format!("{I18N_ERROR_PREFIX}{key}|{params}")
+}
+
+fn emit_firmware_progress(
+    app_handle: &tauri::AppHandle,
+    tracker_id: u8,
+    phase: &str,
+    progress: u8,
+    message: String,
+) {
+    let _ = app_handle.emit(
+        "firmware-progress",
+        FirmwareProgressEvent {
+            tracker_id,
+            phase: phase.to_string(),
+            progress,
+            message,
+        },
+    );
 }
 
 fn list_matching_ports() -> Result<Vec<DockPort>, String> {
@@ -204,11 +302,12 @@ async fn send_command_via_channel(
     payload: Value,
     timeout_secs: u64,
 ) -> Result<Value, String> {
+    let _command_guard = state.command_guard.lock().await;
     let tx = {
-        let guard = state.command_tx.lock().map_err(|e| e.to_string())?;
+        let guard = state.runtime.lock().map_err(|e| e.to_string())?;
         guard
             .as_ref()
-            .cloned()
+            .map(|runtime| runtime.command_tx.clone())
             .ok_or_else(|| i18n_error("backend_errors.dock_not_connected"))?
     };
 
@@ -231,13 +330,22 @@ fn spawn_serial_manager(
     app_handle: tauri::AppHandle,
     mut port: Box<dyn serialport::SerialPort>,
     mut command_rx: mpsc::Receiver<CommandRequest>,
-) {
+    shutdown_rx: std_mpsc::Receiver<()>,
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buffer = Vec::<u8>::new();
         let mut read_chunk = [0_u8; 1024];
         let mut pending_command: Option<oneshot::Sender<Result<Value, String>>> = None;
 
         loop {
+            if shutdown_rx.try_recv().is_ok() {
+                emit_debug_log(&app_handle, "SYS", "Serial manager received shutdown signal.\n");
+                if let Some(tx) = pending_command.take() {
+                    let _ = tx.send(Err(i18n_error("backend_errors.command_interrupted")));
+                }
+                break;
+            }
+
             // 1. 处理来自前端的命令
             // 改为阻塞读取，直到收到新命令、或者 channel 被关闭、或者需要读取串口
             // 使用 recv() 会阻塞，所以我们使用 select 风格或者保持循环但优化结构
@@ -301,7 +409,34 @@ fn spawn_serial_manager(
                 }
             }
         }
-    });
+
+        emit_debug_log(&app_handle, "SYS", "Serial manager exited and serial port dropped.\n");
+    })
+}
+
+fn take_dock_runtime(
+    state: &State<'_, DockConnectionState>,
+) -> Result<Option<DockConnectionRuntime>, String> {
+    let mut guard = state.runtime.lock().map_err(|e| e.to_string())?;
+    Ok(guard.take())
+}
+
+fn close_dock_runtime(runtime: DockConnectionRuntime) -> Result<(), String> {
+    let _ = runtime.shutdown_tx.send(());
+    drop(runtime.command_tx);
+    runtime.thread_handle.join().map_err(|_| {
+        i18n_error("backend_errors.serial_manager_join_failed")
+    })
+}
+
+async fn close_dock_connection(state: &State<'_, DockConnectionState>) -> Result<(), String> {
+    let _command_guard = state.command_guard.lock().await;
+    if let Some(runtime) = take_dock_runtime(state)? {
+        tokio::task::spawn_blocking(move || close_dock_runtime(runtime))
+            .await
+            .map_err(|e| e.to_string())??;
+    }
+    Ok(())
 }
 
 fn parse_info_response(value: Value) -> Result<DockInfo, String> {
@@ -357,8 +492,8 @@ fn parse_auto_sleep_response(value: Value) -> Result<AutoSleepResponse, String> 
 #[derive(Serialize, Clone)]
 struct UsbNode {
     device_id: String,
-    vid: String,
-    pid: String,
+    vid: Option<String>,
+    pid: Option<String>,
     location_path: Option<String>,
     location_info: Option<String>,
 }
@@ -408,36 +543,35 @@ fn get_usb_location_paths(app_handle: &tauri::AppHandle) -> Result<Vec<UsbNode>,
             continue;
         };
 
-        if let Some((vid, pid)) = extract_vid_pid(&source_text) {
-            let location_path = get_registry_property_multi_sz(hdev, &mut devinfo, SPDRP_LOCATION_PATHS)
-                .and_then(|v| v.first().cloned());
-            let location_info =
-                get_registry_property_sz(hdev, &mut devinfo, SPDRP_LOCATION_INFORMATION);
-            emit_debug_log(
-                app_handle,
-                "USB",
-                &format!(
-                    "Node VID:PID {}:{}, path: {}, info: {}\n",
-                    vid,
-                    pid,
-                    location_path.as_deref().unwrap_or("-"),
-                    location_info.as_deref().unwrap_or("-")
-                ),
-            );
-            nodes.push(UsbNode {
-                device_id: instance_id.unwrap_or(source_text),
-                vid,
-                pid,
-                location_path,
-                location_info,
-            });
-        }
+        let location_path = get_registry_property_multi_sz(hdev, &mut devinfo, SPDRP_LOCATION_PATHS)
+            .and_then(|v| v.first().cloned());
+        let location_info = get_registry_property_sz(hdev, &mut devinfo, SPDRP_LOCATION_INFORMATION);
+        let vid_pid = extract_vid_pid(&source_text);
+        emit_debug_log(
+            app_handle,
+            "USB",
+            &format!(
+                "Node source: {}, VID:PID {}:{}, path: {}, info: {}\n",
+                source_text,
+                vid_pid.as_ref().map(|(vid, _)| vid.as_str()).unwrap_or("-"),
+                vid_pid.as_ref().map(|(_, pid)| pid.as_str()).unwrap_or("-"),
+                location_path.as_deref().unwrap_or("-"),
+                location_info.as_deref().unwrap_or("-")
+            ),
+        );
+        nodes.push(UsbNode {
+            device_id: instance_id.unwrap_or(source_text),
+            vid: vid_pid.as_ref().map(|(vid, _)| vid.clone()),
+            pid: vid_pid.as_ref().map(|(_, pid)| pid.clone()),
+            location_path,
+            location_info,
+        });
     }
     unsafe {
         SetupDiDestroyDeviceInfoList(hdev);
     }
 
-    emit_debug_log(app_handle, "USB", &format!("Parsed {} nodes with valid VID/PID.\n", nodes.len()));
+    emit_debug_log(app_handle, "USB", &format!("Parsed {} USB-related nodes.\n", nodes.len()));
     Ok(nodes)
 }
 
@@ -611,77 +745,289 @@ fn relative_ports_match(actual: &[u8], expected: &[u8]) -> bool {
     actual.len() >= expected.len() && actual[..expected.len()] == *expected
 }
 
+fn get_slot_path(slot_id: u8) -> Option<(&'static str, &'static [u8])> {
+    SLOT_PATHS
+        .iter()
+        .find(|(id, _, _)| *id == slot_id)
+        .map(|(_, label, ports)| (*label, *ports))
+}
+
+fn get_primary_hub_path(nodes: &[UsbNode]) -> Option<String> {
+    let base_node = nodes.iter().find(|node| {
+        node.vid.as_deref() == Some("303A") && node.pid.as_deref() == Some("1001")
+    })?;
+    let base_path = base_node.location_path.as_deref().map(remove_usbmi_suffix)?;
+    let last_hash = base_path.rfind('#')?;
+    Some(base_path[..last_hash].to_string())
+}
+
+fn slot_present_in_nodes(nodes: &[UsbNode], primary_hub_path: &str, expected_ports: &[u8]) -> bool {
+    nodes.iter().any(|node| {
+        let Some(path) = node.location_path.as_deref() else {
+            return false;
+        };
+        let path_clean = remove_usbmi_suffix(path);
+        if !path_clean.starts_with(primary_hub_path) {
+            return false;
+        }
+        let relative_path = &path_clean[primary_hub_path.len()..];
+        let ports = parse_relative_usb_ports(relative_path);
+        relative_ports_match(&ports, expected_ports)
+    })
+}
+
+fn get_drive_label(root_path: &str) -> Option<String> {
+    let wide_root = to_wide_null(root_path);
+    let mut volume_name = vec![0u16; 261];
+    let ok = unsafe {
+        GetVolumeInformationW(
+            wide_root.as_ptr(),
+            volume_name.as_mut_ptr(),
+            volume_name.len() as u32,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let len = volume_name
+        .iter()
+        .position(|ch| *ch == 0)
+        .unwrap_or(volume_name.len());
+    if len == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&volume_name[..len]))
+}
+
+fn list_candidate_drives() -> Result<Vec<String>, String> {
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return Err(i18n_error_with_params(
+            "backend_errors.logical_drives_failed",
+            json!({ "code": unsafe { GetLastError() } }),
+        ));
+    }
+
+    let mut drives = Vec::new();
+    for index in 0..26 {
+        if mask & (1 << index) == 0 {
+            continue;
+        }
+        let letter = (b'A' + index as u8) as char;
+        let root_path = format!("{letter}:\\");
+        let drive_type = unsafe { GetDriveTypeW(to_wide_null(&root_path).as_ptr()) };
+        if drive_type == DRIVE_TYPE_NO_ROOT_DIR {
+            continue;
+        }
+        if drive_type == DRIVE_TYPE_REMOVABLE || drive_type == DRIVE_TYPE_FIXED {
+            drives.push(root_path);
+        }
+    }
+
+    drives.sort();
+    Ok(drives)
+}
+
+fn sanitize_firmware_file_name(file_name: &str) -> Result<String, String> {
+    Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| i18n_error("backend_errors.invalid_firmware_file_name"))
+}
+
+async fn wait_for_bootloader_drive(
+    app_handle: &tauri::AppHandle,
+    tracker_id: u8,
+    baseline_drives: &[String],
+) -> Result<String, String> {
+    let baseline_set: BTreeSet<String> = baseline_drives.iter().cloned().collect();
+    let (_, expected_ports) =
+        get_slot_path(tracker_id).ok_or_else(|| i18n_error("backend_errors.flash_slot_out_of_range"))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut fallback_drive: Option<String> = None;
+
+    while tokio::time::Instant::now() <= deadline {
+        let current_drives = list_candidate_drives()?;
+        let new_drives = current_drives
+            .iter()
+            .filter(|drive| !baseline_set.contains(*drive))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if new_drives.len() == 1 {
+            fallback_drive = new_drives.first().cloned();
+        }
+
+        let nodes = get_usb_location_paths(app_handle)?;
+        if let Some(primary_hub_path) = get_primary_hub_path(&nodes) {
+            let slot_ready = slot_present_in_nodes(&nodes, &primary_hub_path, expected_ports);
+            if slot_ready {
+                if new_drives.len() == 1 {
+                    return Ok(new_drives[0].clone());
+                }
+                if new_drives.len() > 1 {
+                    if let Some(preferred) = new_drives.iter().find_map(|drive| {
+                        let label = get_drive_label(drive)?;
+                        let upper = label.to_ascii_uppercase();
+                        if upper.contains("UF2") || upper.contains("BOOT") {
+                            Some(drive.clone())
+                        } else {
+                            None
+                        }
+                    }) {
+                        return Ok(preferred);
+                    }
+                    return Err(i18n_error("backend_errors.bootloader_drive_ambiguous"));
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    fallback_drive.ok_or_else(|| i18n_error("backend_errors.bootloader_drive_timeout"))
+}
+
+async fn wait_for_drive_removal(drive_root: &str, timeout_secs: u64) -> Result<bool, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    while tokio::time::Instant::now() <= deadline {
+        let drives = list_candidate_drives()?;
+        if !drives.iter().any(|drive| drive.eq_ignore_ascii_case(drive_root)) {
+            return Ok(true);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Ok(false)
+}
+
+async fn copy_firmware_to_drive(
+    app_handle: tauri::AppHandle,
+    tracker_id: u8,
+    drive_root: String,
+    file_name: String,
+    file_data: Vec<u8>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let total_bytes = file_data.len();
+        let target_path = Path::new(&drive_root).join(&file_name);
+        let mut file = File::create(&target_path).map_err(|error| {
+            i18n_error_with_params(
+                "backend_errors.firmware_copy_failed",
+                json!({ "msg": error.to_string() }),
+            )
+        })?;
+
+        if total_bytes == 0 {
+            return Err(i18n_error("backend_errors.empty_firmware_file"));
+        }
+
+        let mut offset = 0usize;
+        let chunk_size = 64 * 1024;
+        while offset < total_bytes {
+            let end = (offset + chunk_size).min(total_bytes);
+            file.write_all(&file_data[offset..end]).map_err(|error| {
+                i18n_error_with_params(
+                    "backend_errors.firmware_copy_failed",
+                    json!({ "msg": error.to_string() }),
+                )
+            })?;
+            offset = end;
+            let progress = 20u8.saturating_add(((offset as f64 / total_bytes as f64) * 75.0) as u8);
+            emit_firmware_progress(
+                &app_handle,
+                tracker_id,
+                "copying",
+                progress.min(95),
+                i18n_error_with_params(
+                    "flashing.progress_copying",
+                    json!({ "progress": ((offset as f64 / total_bytes as f64) * 100.0).round() as u8 }),
+                ),
+            );
+        }
+
+        file.flush().map_err(|error| {
+            i18n_error_with_params(
+                "backend_errors.firmware_copy_failed",
+                json!({ "msg": error.to_string() }),
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            i18n_error_with_params(
+                "backend_errors.firmware_copy_failed",
+                json!({ "msg": error.to_string() }),
+            )
+        })?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|error| {
+        i18n_error_with_params(
+            "backend_errors.firmware_task_join_failed",
+            json!({ "msg": error.to_string() }),
+        )
+    })?
+}
+
 #[tauri::command]
 async fn scan_usb_topology(app_handle: tauri::AppHandle) -> Result<Vec<TrackerStatus>, String> {
     let nodes = get_usb_location_paths(&app_handle)?;
-    
-    let base_node = nodes.iter().find(|n| n.vid == "303A" && n.pid == "1001");
-    
     let mut tracker_info = Vec::new();
-    
-    if let Some(base) = base_node {
-        let base_path_clean = base.location_path.as_deref().map(remove_usbmi_suffix);
+
+    if let Some(base) = nodes.iter().find(|node| {
+        node.vid.as_deref() == Some("303A") && node.pid.as_deref() == Some("1001")
+    }) {
         emit_debug_log(
             &app_handle,
             "USB",
             &format!(
                 "Found Base (303A:1001), path: {}, info: {}\n",
-                base_path_clean.unwrap_or("-"),
+                base.location_path.as_deref().map(remove_usbmi_suffix).unwrap_or("-"),
                 base.location_info.as_deref().unwrap_or("-")
             ),
         );
 
-        if let Some(base_path) = base_path_clean {
-            if let Some(last_hash) = base_path.rfind('#') {
-                let primary_hub_path = &base_path[..last_hash];
-                emit_debug_log(&app_handle, "USB", &format!("Identified Primary HUB path: {}\n", primary_hub_path));
-                let slot_paths: [(u8, &str, &[u8]); 5] = [
-                    (1, "Hub1-P4", &[4]),
-                    (2, "Hub2-P1", &[3, 1]),
-                    (3, "Hub2-P2", &[3, 2]),
-                    (4, "Hub2-P3", &[3, 3]),
-                    (5, "Hub2-P4", &[3, 4]),
-                ];
+        if let Some(primary_hub_path) = get_primary_hub_path(&nodes) {
+            emit_debug_log(
+                &app_handle,
+                "USB",
+                &format!("Identified Primary HUB path: {}\n", primary_hub_path),
+            );
+            emit_debug_log(
+                &app_handle,
+                "USB",
+                "Using fixed slot topology: Hub1-P4, Hub2 behind Hub1-P3 (P1..P4 => Slot2..Slot5)\n",
+            );
+
+            for (slot_id, label, expected_ports) in SLOT_PATHS {
+                let found = slot_present_in_nodes(&nodes, &primary_hub_path, expected_ports);
                 emit_debug_log(
                     &app_handle,
                     "USB",
-                    "Using fixed slot topology: Hub1-P4, Hub2 behind Hub1-P3 (P1..P4 => Slot2..Slot5)\n",
+                    &format!(
+                        "Slot {} ({}) presence by address {:?}: {}\n",
+                        slot_id,
+                        label,
+                        expected_ports,
+                        if found { "found" } else { "not found" }
+                    ),
                 );
-
-                for (slot_id, label, expected_ports) in slot_paths {
-                    let found = nodes.iter().any(|node| {
-                        let Some(path) = node.location_path.as_deref() else {
-                            return false;
-                        };
-                        let path_clean = remove_usbmi_suffix(path);
-                        if !path_clean.starts_with(primary_hub_path) {
-                            return false;
-                        }
-                        let relative_path = &path_clean[primary_hub_path.len()..];
-                        let ports = parse_relative_usb_ports(relative_path);
-                        relative_ports_match(&ports, expected_ports)
-                    });
-                    emit_debug_log(
-                        &app_handle,
-                        "USB",
-                        &format!(
-                            "Slot {} ({}) presence by address {:?}: {}\n",
-                            slot_id,
-                            label,
-                            expected_ports,
-                            if found { "found" } else { "not found" }
-                        ),
+                if found {
+                    push_tracker_unique(
+                        &mut tracker_info,
+                        TrackerStatus {
+                            id: slot_id,
+                            inserted: true,
+                            usb_path: Some(label.to_string()),
+                        },
                     );
-                    if found {
-                        push_tracker_unique(
-                            &mut tracker_info,
-                            TrackerStatus {
-                                id: slot_id,
-                                inserted: true,
-                                usb_path: Some(label.to_string()),
-                            },
-                        );
-                    }
                 }
             }
         }
@@ -702,11 +1048,180 @@ async fn scan_usb_topology(app_handle: tauri::AppHandle) -> Result<Vec<TrackerSt
 }
 
 #[tauri::command]
+async fn flash_tracker_firmware(
+    app_handle: tauri::AppHandle,
+    state: State<'_, DockConnectionState>,
+    firmware_state: State<'_, FirmwareJobState>,
+    tracker_id: u8,
+    file_name: String,
+    file_data: Vec<u8>,
+) -> Result<FirmwareFlashResult, String> {
+    let _job_guard = lock_firmware_job(&firmware_state)?;
+    let safe_file_name = sanitize_firmware_file_name(&file_name)?;
+    if !FLASHABLE_SLOT_IDS.contains(&tracker_id) {
+        return Err(i18n_error("backend_errors.flash_slot_out_of_range"));
+    }
+    if !safe_file_name.to_ascii_lowercase().ends_with(".uf2") {
+        return Err(i18n_error("backend_errors.invalid_firmware_file_type"));
+    }
+    if file_data.is_empty() {
+        return Err(i18n_error("backend_errors.empty_firmware_file"));
+    }
+
+    let mut current_progress = 0u8;
+    let result = async {
+        let status_response = get_dock_status(state.clone()).await?;
+        let inserted = status_response
+            .trackers
+            .iter()
+            .find(|tracker| tracker.id == tracker_id)
+            .map(|tracker| tracker.inserted)
+            .unwrap_or(false);
+        if !inserted {
+            return Err(i18n_error_with_params(
+                "backend_errors.flash_target_not_inserted",
+                json!({ "id": tracker_id }),
+            ));
+        }
+
+        let baseline_drives = list_candidate_drives()?;
+        current_progress = 5;
+        emit_firmware_progress(
+            &app_handle,
+            tracker_id,
+            "entering_bl",
+            current_progress,
+            i18n_error_with_params("flashing.progress_entering_bl", json!({ "id": tracker_id })),
+        );
+
+        let ack = control_tracker(state.clone(), "bl".to_string(), tracker_id).await?;
+        if !ack.success {
+            return Err(i18n_error_with_params(
+                "backend_errors.firmware_bl_command_failed",
+                json!({ "msg": ack.msg.unwrap_or(ack.cmd) }),
+            ));
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        current_progress = 15;
+        emit_firmware_progress(
+            &app_handle,
+            tracker_id,
+            "waiting_bootloader",
+            current_progress,
+            i18n_error_with_params("flashing.progress_waiting_bootloader", json!({ "id": tracker_id })),
+        );
+
+        let drive_root = wait_for_bootloader_drive(&app_handle, tracker_id, &baseline_drives).await?;
+        current_progress = 20;
+        emit_firmware_progress(
+            &app_handle,
+            tracker_id,
+            "copying",
+            current_progress,
+            i18n_error_with_params(
+                "flashing.progress_drive_ready",
+                json!({ "drive": drive_root, "name": safe_file_name }),
+            ),
+        );
+
+        let copy_result = copy_firmware_to_drive(
+            app_handle.clone(),
+            tracker_id,
+            drive_root.clone(),
+            safe_file_name.clone(),
+            file_data,
+        )
+        .await;
+
+        current_progress = 96;
+        emit_firmware_progress(
+            &app_handle,
+            tracker_id,
+            "verifying",
+            current_progress,
+            i18n_error_with_params("flashing.progress_waiting_removal", json!({ "drive": drive_root })),
+        );
+
+        match copy_result {
+            Ok(()) => {
+                if wait_for_drive_removal(&drive_root, 20).await? {
+                    current_progress = 100;
+                    let message = i18n_error_with_params(
+                        "flashing.result_success",
+                        json!({ "id": tracker_id }),
+                    );
+                    emit_firmware_progress(
+                        &app_handle,
+                        tracker_id,
+                        "success",
+                        current_progress,
+                        message.clone(),
+                    );
+                    Ok(FirmwareFlashResult {
+                        tracker_id,
+                        success: true,
+                        warning: false,
+                        phase: "success".to_string(),
+                        progress: current_progress,
+                        message,
+                        file_name: safe_file_name,
+                        drive_path: Some(drive_root),
+                    })
+                } else {
+                    Err(i18n_error_with_params(
+                        "backend_errors.bootloader_drive_not_removed",
+                        json!({ "drive": drive_root }),
+                    ))
+                }
+            }
+            Err(copy_error) => {
+                if wait_for_drive_removal(&drive_root, 8).await? {
+                    current_progress = 100;
+                    let message = i18n_error_with_params(
+                        "flashing.result_success_with_warning",
+                        json!({ "id": tracker_id }),
+                    );
+                    emit_firmware_progress(
+                        &app_handle,
+                        tracker_id,
+                        "success",
+                        current_progress,
+                        message.clone(),
+                    );
+                    Ok(FirmwareFlashResult {
+                        tracker_id,
+                        success: true,
+                        warning: true,
+                        phase: "success".to_string(),
+                        progress: current_progress,
+                        message,
+                        file_name: safe_file_name,
+                        drive_path: Some(drive_root),
+                    })
+                } else {
+                    Err(copy_error)
+                }
+            }
+        }
+    }
+    .await;
+
+    if let Err(message) = &result {
+        emit_firmware_progress(&app_handle, tracker_id, "error", current_progress, message.clone());
+    }
+
+    result
+}
+
+#[tauri::command]
 async fn connect_dock(
     app_handle: tauri::AppHandle,
     state: State<'_, DockConnectionState>,
     port_name: String,
 ) -> Result<DockPort, String> {
+    close_dock_connection(&state).await?;
+
     let available = list_matching_ports()?;
     let selected = available
         .iter()
@@ -730,16 +1245,20 @@ async fn connect_dock(
 
     // 2. 创建通信通道
     let (command_tx, command_rx) = mpsc::channel(10);
+    let (shutdown_tx, shutdown_rx) = std_mpsc::channel();
 
     // 3. 启动后台管理线程
-    spawn_serial_manager(app_handle.clone(), port, command_rx);
+    let thread_handle = spawn_serial_manager(app_handle.clone(), port, command_rx, shutdown_rx);
 
     // 4. 更新状态
     {
-        let mut tx_guard = state.command_tx.lock().map_err(|e| e.to_string())?;
-        let mut name_guard = state.port_name.lock().map_err(|e| e.to_string())?;
-        *tx_guard = Some(command_tx);
-        *name_guard = Some(port_name);
+        let mut runtime_guard = state.runtime.lock().map_err(|e| e.to_string())?;
+        *runtime_guard = Some(DockConnectionRuntime {
+            port_name: port_name.clone(),
+            command_tx,
+            shutdown_tx,
+            thread_handle,
+        });
     }
 
     // 5. 初始状态获取（带 3 次重试）
@@ -761,6 +1280,7 @@ async fn connect_dock(
     }
     
     if !last_err.is_empty() {
+        close_dock_connection(&state).await?;
         return Err(i18n_error_with_params(
             "backend_errors.initial_status_failed",
             json!({ "detail": last_err }),
@@ -772,30 +1292,33 @@ async fn connect_dock(
 
 #[tauri::command]
 async fn disconnect_dock(state: State<'_, DockConnectionState>) -> Result<(), String> {
-    let mut tx_guard = state.command_tx.lock().map_err(|e| e.to_string())?;
-    let mut name_guard = state.port_name.lock().map_err(|e| e.to_string())?;
-    *tx_guard = None; // 这会导致后台线程退出
-    *name_guard = None;
-    Ok(())
+    close_dock_connection(&state).await
 }
 
 #[tauri::command]
 fn get_connected_port(state: State<'_, DockConnectionState>) -> Result<Option<String>, String> {
-    Ok(state.port_name.lock().map_err(|e| e.to_string())?.clone())
+    Ok(state
+        .runtime
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .map(|runtime| runtime.port_name.clone()))
 }
 
 #[tauri::command]
-fn check_dock_connection(state: State<'_, DockConnectionState>) -> Result<bool, String> {
-    let connected = state.port_name.lock().map_err(|e| e.to_string())?.clone();
+async fn check_dock_connection(state: State<'_, DockConnectionState>) -> Result<bool, String> {
+    let connected = state
+        .runtime
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .map(|runtime| runtime.port_name.clone());
     let Some(port_name) = connected else {
         return Ok(false);
     };
     let alive = list_matching_ports()?.iter().any(|p| p.port_name == port_name);
     if !alive {
-        let mut tx_guard = state.command_tx.lock().map_err(|e| e.to_string())?;
-        let mut name_guard = state.port_name.lock().map_err(|e| e.to_string())?;
-        *tx_guard = None;
-        *name_guard = None;
+        close_dock_connection(&state).await?;
     }
     Ok(alive)
 }
@@ -829,6 +1352,9 @@ async fn set_bl_mode(
     state: State<'_, DockConnectionState>,
     mode: u8,
 ) -> Result<AckResponse, String> {
+    if !matches!(mode, 0 | 1) {
+        return Err(i18n_error("backend_errors.invalid_bl_mode"));
+    }
     let response = send_command_via_channel(
         &state,
         json!({
@@ -974,7 +1500,6 @@ fn get_app_version(app_handle: tauri::AppHandle) -> AppVersionInfo {
     AppVersionInfo {
         app_name: package_info.name.clone(),
         app_version: package_info.version.to_string(),
-        protocol_version: "1.0.0".to_string(),
     }
 }
 
@@ -983,6 +1508,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(DockConnectionState::default())
+        .manage(FirmwareJobState::default())
         .invoke_handler(tauri::generate_handler![
             discover_docks,
             connect_dock,
@@ -998,6 +1524,7 @@ pub fn run() {
             control_tracker,
             control_all,
             set_dock_led,
+            flash_tracker_firmware,
             open_debug_window,
             scan_usb_topology,
             get_app_version

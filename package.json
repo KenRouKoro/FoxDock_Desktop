@@ -3,10 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@10.29.3",
   "scripts": {
+    "sync:version": "node scripts/sync-version.mjs",
+    "check:version": "node scripts/check-version.mjs",
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "prebuild": "pnpm run sync:version",
+    "build": "pnpm run check:version && vue-tsc --noEmit && vite build",
     "preview": "vite preview",
+    "pretauri": "pnpm run sync:version",
     "tauri": "tauri"
   },
   "dependencies": {

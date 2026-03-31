@@ -8,11 +8,17 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+package-lock.json
 dist
 dist-ssr
 *.local
+project.md
+THEME_SPEC.md
+versioning.md
+pnpm-lock.yaml
 
 .trae/*
+.cursor/*
 API_SPEC.md
 project.md
 

@@ -9,7 +9,6 @@ const { t } = useI18n();
 type AppVersionInfo = {
   appName: string;
   appVersion: string;
-  protocolVersion: string;
 };
 
 const appVersionInfo = ref<AppVersionInfo | null>(null);
@@ -40,10 +39,6 @@ onMounted(async () => {
         <div class="info-item">
           <span class="label">{{ t('app.app_version') }}</span>
           <span class="value">{{ appVersionInfo?.appVersion ?? "-" }}</span>
-        </div>
-        <div class="info-item">
-          <span class="label">{{ t('app.protocol_version') }}</span>
-          <span class="value">{{ appVersionInfo?.protocolVersion ?? "-" }}</span>
         </div>
       </div>
     </BasePanel>
