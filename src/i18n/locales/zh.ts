@@ -48,7 +48,8 @@ export default {
     title: "追踪器状态",
     slot: "槽位 {id}",
     inserted: "已插入",
-    not_inserted: "未插入"
+    not_inserted: "未插入",
+    tracker_version_label: "追踪器版本"
   },
   tracker_control: {
     title: "追踪器控制",
@@ -179,7 +180,23 @@ export default {
     debug_section_hint: "打开独立窗口查看串口收发日志。下方选项用于持久化调试相关偏好。",
     debug_enabled_label: "启用调试扩展",
     open_debug_window: "打开调试窗口",
-    save_failed: "保存设置失败：{msg}"
+    save_failed: "保存设置失败：{msg}",
+    update_auto_check_label: "自动检查应用更新",
+    update_auto_check_hint: "应用启动后自动检查新版本，仅提示，不会自动下载。",
+    update_actions_title: "应用更新",
+    check_update_button: "检查更新",
+    install_update_button: "下载并安装",
+    update_checking: "检查中...",
+    update_installing: "安装中...",
+    update_found_version: "可更新到版本：{version}",
+    update_status_idle: "可手动检查是否有新版本。",
+    update_status_checking: "正在检查更新...",
+    update_status_latest: "当前已是最新版本。",
+    update_status_available: "发现新版本 {version}，可下载并安装。",
+    update_status_installing: "正在下载并安装更新...",
+    update_status_ready_restart: "更新已安装，请手动重启应用以完成升级。",
+    update_status_failed: "检查更新失败：{msg}",
+    update_status_install_failed: "安装更新失败：{msg}"
   },
   notifications: {
     scan_found: "扫描到 {count} 个可用底座",

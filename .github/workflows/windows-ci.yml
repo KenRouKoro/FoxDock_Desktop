@@ -67,12 +67,15 @@ jobs:
 
       # 若配置 Repository secrets：WINDOWS_CODE_SIGNING_PFX_BASE64 + WINDOWS_CODE_SIGNING_PFX_PASSWORD，
       # 则自动导入证书并对 exe/安装包 Authenticode 签名；可选 Inf2Cat+签名 .cat（需 WDK/INF2CAT_EXE）。
+      # 若配置 TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD)，会额外生成 updater 需要的签名与 latest.json。
       # 见 docs/CI_SIGNING.md
       - name: Build Tauri (Windows)
         env:
           WINDOWS_CODE_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_BASE64 }}
           WINDOWS_CODE_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_PASSWORD }}
           INF2CAT_EXE: ${{ vars.INF2CAT_EXE }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: pwsh
         run: ./scripts/ci/run-tauri-windows-build.ps1
 
@@ -82,7 +85,12 @@ jobs:
           name: windows-bundles-${{ github.event_name }}-${{ github.run_number }}
           path: |
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.msi.sig
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+            src-tauri/target/release/bundle/**/*.sig
+            src-tauri/target/release/bundle/**/latest.json
+            src-tauri/target/release/bundle/latest.json
           if-no-files-found: error
 
       - name: Upload release assets (MSI + NSIS setup)
@@ -91,6 +99,11 @@ jobs:
         with:
           files: |
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.msi.sig
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+            src-tauri/target/release/bundle/**/*.sig
+            src-tauri/target/release/bundle/**/latest.json
+            src-tauri/target/release/bundle/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

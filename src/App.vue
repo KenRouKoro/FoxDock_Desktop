@@ -2,6 +2,7 @@
 import { computed, inject, ref, onMounted, onUnmounted, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { check } from "@tauri-apps/plugin-updater";
 import { useI18n } from "vue-i18n";
 
 // 导入组件
@@ -39,6 +40,13 @@ type UsbTopologyResult = {
   id: number;
   inserted: boolean;
   usb_path?: string;
+  tracker_version?: string;
+};
+
+/** Tauri 后端 serde 默认 snake_case，与前端 TrackerStatus 字段对齐用 */
+type TrackerStatusWire = TrackerStatus & {
+  usb_path?: string;
+  tracker_version?: string;
 };
 
 type AckResponse = {
@@ -51,7 +59,7 @@ type DockStatusResponse = {
   led?: boolean;
   bl_mode?: number;
   auto_sleep?: boolean;
-  trackers: TrackerStatus[];
+  trackers: TrackerStatusWire[];
 };
 
 type BlModeResponse = {
@@ -91,6 +99,16 @@ const notifications = ref<Notification[]>([]);
 const blMode = ref<number | null>(null);
 const blModeName = ref("");
 const autoSleepEnabled = ref(false);
+const appUpdateChecking = ref(false);
+const appUpdateInstalling = ref(false);
+const appUpdateAvailable = ref(false);
+const appUpdateVersion = ref<string | null>(null);
+const appUpdateStatusKey = ref("settings.update_status_idle");
+const appUpdateStatusParams = ref<Record<string, unknown>>({});
+const appUpdateStatusText = computed(() =>
+  t(appUpdateStatusKey.value, appUpdateStatusParams.value),
+);
+const pendingAppUpdate = ref<Awaited<ReturnType<typeof check>> | null>(null);
 const firmwareBusy = ref(false);
 const firmwareTrackerId = ref(1);
 const firmwareFile = ref<FirmwareFile | null>(null);
@@ -177,6 +195,11 @@ function addNotification(message: string, type: 'info' | 'success' | 'error' = '
 
 function pushLog(message: string, type: 'info' | 'success' | 'error' = 'info'): void {
   addNotification(message, type);
+}
+
+function setAppUpdateStatus(key: string, params: Record<string, unknown> = {}): void {
+  appUpdateStatusKey.value = key;
+  appUpdateStatusParams.value = params;
 }
 
 function resetConnectedState(): void {
@@ -290,16 +313,23 @@ function resetFirmwareState(options: { keepFile?: boolean } = {}): void {
   }
 }
 
-function normalizeTrackers(current: TrackerStatus[]): TrackerStatus[] {
+function normalizeTrackers(current: TrackerStatusWire[]): TrackerStatus[] {
   const map = new Map(current.map((item) => [item.id, item]));
   return Array.from({ length: 10 }, (_, index) => {
     const id = index + 1;
     const existing = trackers.value.find(t => t.id === id);
     const newData = map.get(id);
+    const usbPath =
+      newData?.usbPath ?? newData?.usb_path ?? existing?.usbPath;
+    const trackerVersion =
+      newData?.trackerVersion ??
+      newData?.tracker_version ??
+      existing?.trackerVersion;
     return {
       id,
       inserted: newData?.inserted ?? false,
-      usbPath: newData?.usbPath ?? existing?.usbPath
+      usbPath,
+      trackerVersion,
     };
   });
 }
@@ -459,7 +489,8 @@ async function scanUsbTopology(): Promise<void> {
         const usbInfo = usbResults.find(u => u.id === t.id);
         return {
           ...t,
-          usbPath: usbInfo?.usb_path ?? t.usbPath
+          usbPath: usbInfo?.usb_path ?? t.usbPath,
+          trackerVersion: usbInfo?.tracker_version ?? t.trackerVersion,
         };
       });
       void maybeTriggerAutoFirmwareUpdate();
@@ -834,6 +865,70 @@ async function setDebugEnabled(enabled: boolean): Promise<void> {
   await persistSystemSettings();
 }
 
+async function setAutoCheckUpdate(enabled: boolean): Promise<void> {
+  systemSettings.value = {
+    ...systemSettings.value,
+    autoCheckUpdate: enabled,
+  };
+  await persistSystemSettings();
+}
+
+async function checkForAppUpdate(options: { silentNoUpdate?: boolean } = {}): Promise<void> {
+  if (appUpdateChecking.value || appUpdateInstalling.value) return;
+  appUpdateChecking.value = true;
+  setAppUpdateStatus("settings.update_status_checking");
+  try {
+    const update = await check();
+    if (!update) {
+      pendingAppUpdate.value = null;
+      appUpdateAvailable.value = false;
+      appUpdateVersion.value = null;
+      setAppUpdateStatus("settings.update_status_latest");
+      if (!options.silentNoUpdate) {
+        pushLog(t("settings.update_status_latest"), "info");
+      }
+      return;
+    }
+    pendingAppUpdate.value = update;
+    appUpdateAvailable.value = true;
+    appUpdateVersion.value = update.version;
+    setAppUpdateStatus("settings.update_status_available", {
+      version: update.version,
+    });
+    pushLog(t("settings.update_status_available", { version: update.version }), "success");
+  } catch (error) {
+    pendingAppUpdate.value = null;
+    appUpdateAvailable.value = false;
+    appUpdateVersion.value = null;
+    const msg = getErrorMessage(error);
+    setAppUpdateStatus("settings.update_status_failed", { msg });
+    pushLog(t("settings.update_status_failed", { msg }), "error");
+  } finally {
+    appUpdateChecking.value = false;
+  }
+}
+
+async function installAppUpdate(): Promise<void> {
+  if (appUpdateInstalling.value || appUpdateChecking.value) return;
+  if (!pendingAppUpdate.value) {
+    await checkForAppUpdate({ silentNoUpdate: true });
+  }
+  if (!pendingAppUpdate.value) return;
+  appUpdateInstalling.value = true;
+  setAppUpdateStatus("settings.update_status_installing");
+  try {
+    await pendingAppUpdate.value.downloadAndInstall();
+    setAppUpdateStatus("settings.update_status_ready_restart");
+    pushLog(t("settings.update_status_ready_restart"), "success");
+  } catch (error) {
+    const msg = getErrorMessage(error);
+    setAppUpdateStatus("settings.update_status_install_failed", { msg });
+    pushLog(t("settings.update_status_install_failed", { msg }), "error");
+  } finally {
+    appUpdateInstalling.value = false;
+  }
+}
+
 // --- 生命周期 ---
 onMounted(async () => {
   unlistenDock = await listen<any>("dock-event", (event) => {
@@ -844,7 +939,16 @@ onMounted(async () => {
         const id = data.id;
         const inserted = data.event === "inserted";
         markTrackerEvent(id, inserted);
-        trackers.value = trackers.value.map(t => t.id === id ? { ...t, inserted, usbPath: inserted ? t.usbPath : undefined } : t);
+        trackers.value = trackers.value.map(t =>
+          t.id === id
+            ? {
+                ...t,
+                inserted,
+                usbPath: inserted ? t.usbPath : undefined,
+                trackerVersion: inserted ? t.trackerVersion : undefined,
+              }
+            : t,
+        );
         if (inserted) {
           if (
             firmwareMode.value === "auto_slot" &&
@@ -909,6 +1013,11 @@ onMounted(async () => {
     connectionMonitorTimer = window.setInterval(() => {
       void checkDockConnectionHealth();
     }, 1500);
+    if (systemSettings.value.autoCheckUpdate && !import.meta.env.DEV) {
+      window.setTimeout(() => {
+        void checkForAppUpdate({ silentNoUpdate: true });
+      }, 1200);
+    }
   }
 });
 
@@ -1002,8 +1111,17 @@ onUnmounted(() => {
         v-else-if="currentView === 'settings'"
         :language-preference="systemSettings.languagePreference"
         :debug-enabled="systemSettings.debugEnabled"
+        :auto-check-update="systemSettings.autoCheckUpdate"
+        :update-checking="appUpdateChecking"
+        :update-installing="appUpdateInstalling"
+        :update-available="appUpdateAvailable"
+        :update-version="appUpdateVersion"
+        :update-status-text="appUpdateStatusText"
         @update:language-preference="setLanguagePreference"
         @update:debug-enabled="setDebugEnabled"
+        @update:auto-check-update="setAutoCheckUpdate"
+        @check-update="checkForAppUpdate"
+        @install-update="installAppUpdate"
         @open-debug="openDebug"
       />
     </div>

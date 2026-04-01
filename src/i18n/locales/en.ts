@@ -48,7 +48,8 @@ export default {
     title: "Tracker Status",
     slot: "Slot {id}",
     inserted: "Inserted",
-    not_inserted: "Not Inserted"
+    not_inserted: "Not Inserted",
+    tracker_version_label: "Tracker version"
   },
   tracker_control: {
     title: "Tracker Control",
@@ -182,7 +183,23 @@ export default {
       "Open a separate window for serial TX/RX logs. The option below persists debug-related preferences.",
     debug_enabled_label: "Enable debug extras",
     open_debug_window: "Open debug window",
-    save_failed: "Failed to save settings: {msg}"
+    save_failed: "Failed to save settings: {msg}",
+    update_auto_check_label: "Automatically check for app updates",
+    update_auto_check_hint: "Check for updates on startup and prompt only. No automatic download.",
+    update_actions_title: "App update",
+    check_update_button: "Check for updates",
+    install_update_button: "Download and install",
+    update_checking: "Checking...",
+    update_installing: "Installing...",
+    update_found_version: "New version available: {version}",
+    update_status_idle: "You can manually check for new versions.",
+    update_status_checking: "Checking for updates...",
+    update_status_latest: "You are on the latest version.",
+    update_status_available: "New version {version} is available to install.",
+    update_status_installing: "Downloading and installing update...",
+    update_status_ready_restart: "Update installed. Please restart the app to finish upgrading.",
+    update_status_failed: "Update check failed: {msg}",
+    update_status_install_failed: "Update installation failed: {msg}"
   },
   notifications: {
     scan_found: "Scanned {count} available docks",

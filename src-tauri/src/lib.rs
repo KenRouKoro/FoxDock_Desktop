@@ -1,4 +1,5 @@
 mod system_settings;
+mod usb_build_info;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -143,6 +144,8 @@ struct TrackerStatus {
     id: u8,
     inserted: bool,
     usb_path: Option<String>,
+    #[serde(default)]
+    tracker_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -832,6 +835,44 @@ fn slot_present_in_nodes(nodes: &[UsbNode], primary_hub_path: &str, expected_por
     })
 }
 
+/// 定位槽位上 VID/PID 为追踪器的 USB 节点（优先复合设备父节点，而非 `&MI_xx` 接口子节点）。
+fn find_tracker_node_for_slot<'a>(
+    nodes: &'a [UsbNode],
+    primary_hub_path: &str,
+    expected_ports: &[u8],
+) -> Option<&'a UsbNode> {
+    let matches: Vec<&'a UsbNode> = nodes
+        .iter()
+        .filter(|node| {
+            let vid = node.vid.as_deref().map(|s| s.to_ascii_uppercase());
+            let pid = node.pid.as_deref().map(|s| s.to_ascii_uppercase());
+            if vid.as_deref() != Some("1209") || pid.as_deref() != Some("7692") {
+                return false;
+            }
+            let Some(path) = node.location_path.as_deref() else {
+                return false;
+            };
+            let path_clean = remove_usbmi_suffix(path);
+            if !path_clean.starts_with(primary_hub_path) {
+                return false;
+            }
+            let relative_path = &path_clean[primary_hub_path.len()..];
+            let ports = parse_relative_usb_ports(relative_path);
+            relative_ports_match(&ports, expected_ports)
+        })
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    if let Some(n) = matches
+        .iter()
+        .find(|n| !n.device_id.to_ascii_uppercase().contains("&MI_"))
+    {
+        return Some(*n);
+    }
+    matches.first().copied()
+}
+
 fn get_drive_label(root_path: &str) -> Option<String> {
     let wide_root = to_wide_null(root_path);
     let mut volume_name = vec![0u16; 261];
@@ -1076,12 +1117,26 @@ async fn scan_usb_topology(app_handle: tauri::AppHandle) -> Result<Vec<TrackerSt
                     ),
                 );
                 if found {
+                    let tracker_version = match find_tracker_node_for_slot(
+                        &nodes,
+                        &primary_hub_path,
+                        expected_ports,
+                    ) {
+                        Some(node) => usb_build_info::read_tracker_usb_build_info_with_log(
+                            &node.device_id,
+                            |msg| {
+                                emit_debug_log(&app_handle, "USB", msg);
+                            },
+                        ),
+                        None => None,
+                    };
                     push_tracker_unique(
                         &mut tracker_info,
                         TrackerStatus {
                             id: slot_id,
                             inserted: true,
                             usb_path: Some(label.to_string()),
+                            tracker_version,
                         },
                     );
                 }
@@ -1569,6 +1624,7 @@ fn get_app_version(app_handle: tauri::AppHandle) -> AppVersionInfo {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(DockConnectionState::default())
         .manage(FirmwareJobState::default())
         .invoke_handler(tauri::generate_handler![

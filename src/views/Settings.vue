@@ -17,11 +17,20 @@ type AppVersionInfo = {
 const props = defineProps<{
   languagePreference: LanguagePreference;
   debugEnabled: boolean;
+  autoCheckUpdate: boolean;
+  updateChecking: boolean;
+  updateInstalling: boolean;
+  updateAvailable: boolean;
+  updateVersion: string | null;
+  updateStatusText: string;
 }>();
 
 const emit = defineEmits<{
   (e: "update:languagePreference", value: LanguagePreference): void;
   (e: "update:debugEnabled", value: boolean): void;
+  (e: "update:autoCheckUpdate", value: boolean): void;
+  (e: "checkUpdate"): void;
+  (e: "installUpdate"): void;
   (e: "openDebug"): void;
 }>();
 
@@ -42,6 +51,11 @@ function onLanguageSelect(value: string) {
 function onDebugToggle(event: Event) {
   const checked = (event.target as HTMLInputElement).checked;
   emit("update:debugEnabled", checked);
+}
+
+function onAutoCheckToggle(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked;
+  emit("update:autoCheckUpdate", checked);
 }
 </script>
 
@@ -94,6 +108,55 @@ function onDebugToggle(event: Event) {
         <div class="info-item">
           <span class="label">{{ t("app.app_version") }}</span>
           <span class="value">{{ appVersionInfo?.appVersion ?? "-" }}</span>
+        </div>
+        <div class="info-item info-item--wrap">
+          <div class="setting-label-block">
+            <span class="label">{{ t("settings.update_auto_check_label") }}</span>
+            <p class="setting-hint">{{ t("settings.update_auto_check_hint") }}</p>
+          </div>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              class="checkbox-input"
+              :checked="props.autoCheckUpdate"
+              @change="onAutoCheckToggle"
+            />
+            <span>{{ t("settings.update_auto_check_label") }}</span>
+          </label>
+        </div>
+        <div class="info-item info-item--wrap">
+          <div class="setting-label-block">
+            <span class="label">{{ t("settings.update_actions_title") }}</span>
+            <p class="setting-hint">{{ props.updateStatusText }}</p>
+            <p v-if="props.updateAvailable && props.updateVersion" class="setting-hint">
+              {{ t("settings.update_found_version", { version: props.updateVersion }) }}
+            </p>
+          </div>
+          <div class="setting-debug-actions">
+            <BaseButton
+              variant="secondary"
+              :disabled="props.updateChecking || props.updateInstalling"
+              @click="emit('checkUpdate')"
+            >
+              {{
+                props.updateChecking
+                  ? t("settings.update_checking")
+                  : t("settings.check_update_button")
+              }}
+            </BaseButton>
+            <BaseButton
+              v-if="props.updateAvailable"
+              variant="debug"
+              :disabled="props.updateChecking || props.updateInstalling"
+              @click="emit('installUpdate')"
+            >
+              {{
+                props.updateInstalling
+                  ? t("settings.update_installing")
+                  : t("settings.install_update_button")
+              }}
+            </BaseButton>
+          </div>
         </div>
       </div>
     </BasePanel>
@@ -190,6 +253,11 @@ function onDebugToggle(event: Event) {
   border: var(--border-width-subtle) solid var(--color-secondary-hover);
   background: var(--color-bg-panel);
   padding: var(--spacing-sm);
+}
+
+.info-item--wrap {
+  grid-template-columns: 1fr;
+  align-items: start;
 }
 
 .info-item .label {

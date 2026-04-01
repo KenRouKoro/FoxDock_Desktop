@@ -14,6 +14,8 @@
 |--------|------|
 | `WINDOWS_CODE_SIGNING_PFX_BASE64` | 代码签名证书 **PFX** 文件经 Base64 编码后的整串内容（不含换行）。 |
 | `WINDOWS_CODE_SIGNING_PFX_PASSWORD` | 该 PFX 的密码。 |
+| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater 用私钥内容（`tauri signer generate` 生成）。 |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 上述 updater 私钥密码（若生成时设置）。 |
 
 生成本地 Base64（PowerShell 示例）：
 
@@ -22,6 +24,18 @@
 ```
 
 将输出粘贴到 Secret 的值中即可。
+
+## Updater 签名与 Release 资产
+
+- `TAURI_SIGNING_PRIVATE_KEY` 配置后，Tauri 构建会生成 updater 所需签名文件（`.sig`）与 `latest.json`。
+- Windows CI 现已上传 MSI/NSIS 及其 `.sig`，并尝试上传 `latest.json` 到 workflow artifacts 与 GitHub Release。
+- 自动更新依赖 `src-tauri/tauri.conf.json` 中的 `plugins.updater.pubkey` 与 `endpoints`，请确保公钥和 Release 资产匹配。
+
+本地生成 updater 密钥（PowerShell）示例：
+
+```powershell
+pnpm tauri signer generate -w "$HOME/.tauri/foxdock-updater.key"
+```
 
 ## 可选：指定 Inf2Cat 路径（驱动目录包）
 

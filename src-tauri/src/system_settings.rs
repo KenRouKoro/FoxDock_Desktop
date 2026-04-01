@@ -12,6 +12,8 @@ pub struct SystemSettings {
     pub language_preference: LanguagePreference,
     #[serde(default)]
     pub debug_enabled: bool,
+    #[serde(default = "default_auto_check_update")]
+    pub auto_check_update: bool,
 }
 
 impl Default for SystemSettings {
@@ -19,8 +21,13 @@ impl Default for SystemSettings {
         Self {
             language_preference: LanguagePreference::default(),
             debug_enabled: false,
+            auto_check_update: default_auto_check_update(),
         }
     }
+}
+
+fn default_auto_check_update() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

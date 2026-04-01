@@ -18,4 +18,6 @@ export type TrackerStatus = {
   id: number;
   inserted: boolean;
   usbPath?: string;
+  /** USB 构建信息解析后的展示串（当前来源为 HID Build Info） */
+  trackerVersion?: string;
 };

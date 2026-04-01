@@ -2,14 +2,9 @@
 import { ref, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import BasePanel from "./ui/BasePanel.vue";
+import type { TrackerStatus } from "../types/dock";
 
 const { t } = useI18n();
-
-type TrackerStatus = {
-  id: number;
-  inserted: boolean;
-  usbPath?: string;
-};
 
 const props = defineProps<{
   trackers: TrackerStatus[];
@@ -73,6 +68,9 @@ onUnmounted(() => {
         <div class="tracker-info">
           <span class="slot-name">{{ t('tracker_status.slot', { id: item.id }) }}</span>
           <span v-if="item.usbPath" class="usb-path">{{ item.usbPath }}</span>
+          <span v-if="item.trackerVersion" class="tracker-version">
+            {{ t('tracker_status.tracker_version_label') }} {{ item.trackerVersion }}
+          </span>
         </div>
         <span>{{ item.inserted ? t('tracker_status.inserted') : t('tracker_status.not_inserted') }}</span>
       </div>
@@ -134,8 +132,19 @@ onUnmounted(() => {
   font-family: var(--font-family-mono);
 }
 
+.tracker-version {
+  font-size: 10px;
+  color: var(--color-text-light);
+  font-family: var(--font-family-mono);
+  word-break: break-all;
+}
+
 .tracker-cell.inserted .usb-path {
   color: var(--color-success-border);
+}
+
+.tracker-cell.inserted .tracker-version {
+  color: var(--color-text-main);
 }
 
 .tracker-cell.inserted {

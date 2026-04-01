@@ -18,8 +18,10 @@ versioning.md
 
 .trae/*
 .cursor/*
+docs/*
 API_SPEC.md
 project.md
+~*
 
 # Editor directories and files
 .vscode/*
