@@ -1,23 +1,14 @@
 /**
- * 以根目录 package.json 的 version 为唯一来源，同步到 Tauri 与 Cargo 配置。
+ * 派生真实应用版本（见 scripts/version-utils.mjs），并同步到 Tauri 与 Cargo 配置。
  * 用法: node scripts/sync-version.mjs
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deriveAppVersion } from "./version-utils.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
-
-function readPackageVersion() {
-  const pkgPath = join(root, "package.json");
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-  const v = pkg.version;
-  if (!v || typeof v !== "string") {
-    throw new Error("package.json: missing or invalid \"version\"");
-  }
-  return v.trim();
-}
 
 function syncTauriConf(version) {
   const path = join(root, "src-tauri", "tauri.conf.json");
@@ -53,7 +44,7 @@ function syncCargoToml(version) {
   writeFileSync(path, lines.join("\n"), "utf8");
 }
 
-const version = readPackageVersion();
+const version = deriveAppVersion(root);
 syncTauriConf(version);
 syncCargoToml(version);
 console.log(`sync-version: ${version} -> tauri.conf.json, Cargo.toml`);

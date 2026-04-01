@@ -29,6 +29,9 @@
   --border-width: 2px;
   --border-radius: 0px;
   --border-color: var(--color-secondary);
+  /* 与 outline 按钮一致的表单控件描边/悬停（下拉、文件选择等） */
+  --color-border-control: var(--color-primary);
+  --color-bg-control-hover: var(--color-secondary-hover);
   --box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.1);
   --box-shadow-heavy: 8px 8px 0 rgba(0, 0, 0, 0.2);
 

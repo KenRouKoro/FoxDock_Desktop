@@ -537,12 +537,51 @@ function formatFileSize(bytes: number): string {
 }
 
 .file-input {
-  border: var(--border-width) solid var(--border-color);
+  border: var(--border-width) solid var(--color-border-control);
+  border-radius: var(--border-radius);
   background: var(--color-bg-white);
   color: var(--color-text-main);
-  padding: 8px 10px;
+  font-size: 14px;
+  line-height: 1.25;
   width: 100%;
   max-width: 100%;
+  min-height: 32px;
+  padding: 0 var(--spacing-sm) 0 0;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  outline: none;
+}
+
+.file-input:focus-visible:not(:disabled) {
+  border-color: var(--color-primary);
+  box-shadow: inset 0 0 0 1px var(--color-primary);
+}
+
+.file-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.file-input::file-selector-button {
+  border: none;
+  border-right: var(--border-width) solid var(--color-border-control);
+  background: var(--color-bg-white);
+  color: var(--color-primary);
+  padding: 6px 12px;
+  margin: 0 var(--spacing-sm) 0 0;
+  font-size: 14px;
+  line-height: 1.25;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.file-input:hover:not(:disabled)::file-selector-button {
+  background: var(--color-bg-control-hover);
+}
+
+.file-input:disabled::file-selector-button {
+  cursor: not-allowed;
 }
 
 .file-card {

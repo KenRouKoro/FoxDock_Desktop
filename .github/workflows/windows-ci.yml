@@ -1,0 +1,79 @@
+# Windows-only CI: 底座功能依赖 Windows API，仅在此平台打包。
+# - push：校验构建（不上传 Release 资产）
+# - release published：构建并上传 MSI 与 NSIS 安装程序到对应 Release
+
+name: Windows CI
+
+on:
+  push:
+  release:
+    types: [published]
+
+concurrency:
+  group: windows-ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      # 仅 release published 时由脚本读取，用于 <tag>-<date+time>-<hash> 派生；push 构建为空则走 dev 版本
+      FOXDOCK_RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # Tauri Windows：NSIS（安装 exe）、WiX（MSI）；需在 PATH 中可用
+      - name: Install NSIS and WiX Toolset
+        run: choco install nsis wixtoolset -y
+
+      - name: Add WiX to PATH
+        shell: pwsh
+        run: |
+          $pf86 = ${env:ProgramFiles(x86)}
+          $wixRoot = Get-ChildItem -Path $pf86 -Filter "WiX Toolset*" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $wixRoot) { throw "WiX Toolset not found under $pf86." }
+          $wixBin = Join-Path $wixRoot.FullName "bin"
+          if (-not (Test-Path $wixBin)) { throw "WiX bin not found: $wixBin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri (Windows)
+        run: pnpm tauri build
+
+      - name: Upload release assets (MSI + NSIS setup)
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
