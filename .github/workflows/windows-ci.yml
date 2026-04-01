@@ -1,6 +1,6 @@
 # Windows-only CI: 底座功能依赖 Windows API，仅在此平台打包。
-# - push：校验构建（不上传 Release 资产）
-# - release published：构建并上传 MSI 与 NSIS 安装程序到对应 Release
+# - push：校验构建，并将产物上传到 Actions Artifacts
+# - release published：同样保留 Actions Artifacts，并额外上传 MSI 与 NSIS 安装程序到对应 Release
 
 name: Windows CI
 
@@ -67,6 +67,15 @@ jobs:
 
       - name: Build Tauri (Windows)
         run: pnpm tauri build
+
+      - name: Upload workflow artifacts (MSI + NSIS setup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundles-${{ github.event_name }}-${{ github.run_number }}
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
 
       - name: Upload release assets (MSI + NSIS setup)
         if: github.event_name == 'release'
