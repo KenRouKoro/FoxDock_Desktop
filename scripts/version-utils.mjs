@@ -1,9 +1,9 @@
 /**
  * 共享：派生真实应用版本（SemVer，供 Cargo / Tauri 使用）。
  *
- * - 默认（本地与普通 CI）：`0.0.0-dev.<YYYYMMDD>.<HHmmss>.<shortHash>`（日期时间为 HEAD 提交时间的 UTC；无 package.json 基础前缀，含 dev 标识）
+ * - 默认（本地与普通 CI）：`0.0.0-dev.<YYYYMMDD>.t<HHmmss>.<shortHash>`（日期时间为 HEAD 提交时间的 UTC；`t` 前缀避免纯数字段含前导零违反 SemVer）
  * - GitHub Release 构建：设置环境变量 `FOXDOCK_RELEASE_TAG` 为 Release tag 时，
- *   `<tag 解析出的 semver>-<YYYYMMDD>.<HHmmss>.<shortHash>`（日期时间同上；无 dev 后缀；tag 原样参与解析，见 deriveReleaseAppVersion）
+ *   `<tag 解析出的 semver>-<YYYYMMDD>.t<HHmmss>.<shortHash>`（无 dev 后缀；tag 原样参与解析，见 deriveReleaseAppVersion）
  */
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -31,7 +31,7 @@ export function readPackageBaseVersion(root) {
  * 与墙钟时间相比，同一提交上多次运行 sync/check 结果一致，避免 prebuild 内连续两次 sync 与随后 check 因跨秒不一致。
  *
  * @param {string} root 仓库根目录
- * @returns {{ ymd: string, hm: string }}
+ * @returns {{ ymd: string, timeToken: string }} `timeToken` 为 `t` + HHmmss（UTC），避免如 `023434` 被 SemVer 判为非法数字段（前导零）
  */
 export function getGitCommitDateTimeYYYYMMDD_HHmmssUTC(root) {
   const out = execSync("git show -s --format=%ct HEAD", {
@@ -50,7 +50,9 @@ export function getGitCommitDateTimeYYYYMMDD_HHmmssUTC(root) {
   const H = String(d.getUTCHours()).padStart(2, "0");
   const M = String(d.getUTCMinutes()).padStart(2, "0");
   const s = String(d.getUTCSeconds()).padStart(2, "0");
-  return { ymd: `${y}${m}${day}`, hm: `${H}${M}${s}` };
+  const ymd = `${y}${m}${day}`;
+  const timeToken = `t${H}${M}${s}`;
+  return { ymd, timeToken };
 }
 
 /**
@@ -84,13 +86,13 @@ export function getGitShortHash(root) {
  *
  * @param {string} tag 例如 `v1.2.3` 或 `1.2.3-rc.1`
  * @param {string} ymd YYYYMMDD
- * @param {string} hm HHmmss
+ * @param {string} timeToken `t` + HHmmss（UTC），SemVer 安全
  * @param {string} hash git short hash
  * @returns {string}
  */
-export function deriveReleaseAppVersion(tag, ymd, hm, hash) {
+export function deriveReleaseAppVersion(tag, ymd, timeToken, hash) {
   const parsed = parseGitHubReleaseTag(tag);
-  const stamp = `${ymd}.${hm}.${hash}`;
+  const stamp = `${ymd}.${timeToken}.${hash}`;
   if (parsed.prereleaseFromTag) {
     return `${parsed.core}-${parsed.prereleaseFromTag}.${stamp}`;
   }
@@ -126,10 +128,10 @@ function parseGitHubReleaseTag(tag) {
  */
 export function deriveAppVersion(root) {
   const hash = getGitShortHash(root);
-  const { ymd, hm } = getGitCommitDateTimeYYYYMMDD_HHmmssUTC(root);
+  const { ymd, timeToken } = getGitCommitDateTimeYYYYMMDD_HHmmssUTC(root);
   const releaseTag = process.env[RELEASE_TAG_ENV]?.trim();
   if (releaseTag) {
-    return deriveReleaseAppVersion(releaseTag, ymd, hm, hash);
+    return deriveReleaseAppVersion(releaseTag, ymd, timeToken, hash);
   }
-  return `0.0.0-dev.${ymd}.${hm}.${hash}`;
+  return `0.0.0-dev.${ymd}.${timeToken}.${hash}`;
 }
