@@ -109,7 +109,7 @@ onUnmounted(() => {
 
 .tracker-cell {
   border: var(--border-width) solid var(--color-secondary);
-  background: #eef7ff;
+  background: var(--color-bg-slot-idle);
   padding: var(--spacing-sm);
   display: flex;
   justify-content: space-between;
@@ -165,7 +165,7 @@ onUnmounted(() => {
 .menu-header {
   padding: 6px 12px;
   font-weight: bold;
-  border-bottom: 1px solid var(--color-secondary-hover);
+  border-bottom: var(--border-width-subtle) solid var(--color-secondary-hover);
   color: var(--color-text-secondary);
   font-size: 12px;
 }

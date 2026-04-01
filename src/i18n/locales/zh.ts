@@ -23,6 +23,17 @@ export default {
     app_version: "应用版本",
     close_btn: "关闭"
   },
+  home: {
+    tab_trackers: "槽位状态",
+    tab_control: "控制操作",
+    connection_bar_label: "底座连接",
+    connection_bar_expand: "展开连接",
+    connection_bar_collapse: "收起连接",
+    tabs_aria_label: "首页内容",
+    summary_disconnected: "未连接底座",
+    summary_port: "端口：{port}",
+    summary_inserted: "已插入 {count} / 10"
+  },
   connection: {
     title: "连接管理",
     select_port: "请选择底座端口",
@@ -73,6 +84,11 @@ export default {
   },
   flashing: {
     title: "固件管理",
+    tabs_aria_label: "固件管理分区",
+    tab_config: "任务配置",
+    tab_status: "执行与队列",
+    connection_bar_label: "底座连接与串口",
+    summary_inserted_1_5: "1–5 槽已插入：{count}",
     summary_title: "底座连接",
     summary_disconnected: "未连接",
     config_title: "任务配置",
@@ -154,7 +170,16 @@ export default {
   },
   settings: {
     title: "设置",
-    placeholder: "设置功能开发中..."
+    system_title: "系统",
+    language_label: "界面语言",
+    language_option_system: "跟随系统",
+    language_option_zh: "简体中文",
+    language_option_en: "English",
+    debug_section_title: "调试",
+    debug_section_hint: "打开独立窗口查看串口收发日志。下方选项用于持久化调试相关偏好。",
+    debug_enabled_label: "启用调试扩展",
+    open_debug_window: "打开调试窗口",
+    save_failed: "保存设置失败：{msg}"
   },
   notifications: {
     scan_found: "扫描到 {count} 个可用底座",

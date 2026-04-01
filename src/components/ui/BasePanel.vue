@@ -36,7 +36,7 @@ withDefaults(defineProps<Props>(), {
 
 .panel-header {
   padding: var(--spacing-sm) var(--spacing-md);
-  border-bottom: 1px solid var(--color-secondary-hover);
+  border-bottom: var(--border-width-subtle) solid var(--color-secondary-hover);
   background: var(--color-bg-header);
 }
 
@@ -52,6 +52,6 @@ withDefaults(defineProps<Props>(), {
 
 .panel-footer {
   padding: var(--spacing-sm) var(--spacing-md);
-  border-top: 1px solid var(--color-secondary-hover);
+  border-top: var(--border-width-subtle) solid var(--color-secondary-hover);
 }
 </style>

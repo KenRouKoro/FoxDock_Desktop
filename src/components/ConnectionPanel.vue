@@ -4,28 +4,21 @@ import { ref, watch } from "vue";
 import BaseButton from "./ui/BaseButton.vue";
 import BasePanel from "./ui/BasePanel.vue";
 import BaseSelect from "./ui/BaseSelect.vue";
+import type { DockInfo, DockPort } from "../types/dock";
 
 const { t } = useI18n();
 
-type DockPort = {
-  portName: string;
-  displayName: string;
-  serialNumber: string | null;
-};
-
-type DockInfo = {
-  project: string;
-  version: string;
-  mcu: string;
-  extra?: Record<string, unknown>;
-};
-
-const props = defineProps<{
-  docks: DockPort[];
-  connectedPortName: string;
-  dockInfo: DockInfo | null;
-  loading: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    docks: DockPort[];
+    connectedPortName: string;
+    dockInfo: DockInfo | null;
+    loading: boolean;
+    /** 嵌入首页顶部连接栏时：去标题、去外边距、弱化边框 */
+    embedded?: boolean;
+  }>(),
+  { embedded: false },
+);
 
 const emit = defineEmits<{
   (e: 'refresh'): void;
@@ -47,7 +40,11 @@ watch(
 </script>
 
 <template>
-  <BasePanel :title="t('connection.title')">
+  <BasePanel
+    :class="{ 'connection-panel--embedded': embedded }"
+    :title="embedded ? undefined : t('connection.title')"
+    :padding="embedded ? 'var(--spacing-sm) 0' : 'var(--spacing-md)'"
+  >
     <div class="row">
       <BaseSelect v-model="selectedPortName" :disabled="loading">
         <option value="">{{ t('connection.select_port') }}</option>
@@ -99,7 +96,13 @@ watch(
 
 .info-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
   gap: var(--spacing-sm);
+}
+
+.connection-panel--embedded {
+  margin-bottom: 0;
+  border: none;
+  background: transparent;
 }
 </style>

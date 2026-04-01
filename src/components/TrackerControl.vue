@@ -171,7 +171,7 @@ watch(
 
 .button-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   gap: var(--spacing-sm);
   margin-bottom: 0;
 }

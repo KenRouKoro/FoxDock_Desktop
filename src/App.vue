@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from "vue";
+import { computed, inject, ref, onMounted, onUnmounted, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
@@ -12,29 +12,29 @@ import NotificationManager from "./components/NotificationManager.vue";
 import BaseSpinner from "./components/ui/BaseSpinner.vue";
 import WindowTitleBar from "./components/ui/WindowTitleBar.vue";
 import DebugConsole from "./components/DebugConsole.vue";
+import {
+  SYSTEM_SETTINGS_INJECTION_KEY,
+  type LanguagePreference,
+  type SystemSettings,
+} from "./types/settings";
+import { resolveLocaleFromPreference } from "./utils/locale";
+import type { DockInfo, DockPort, TrackerStatus } from "./types/dock";
+import type {
+  FirmwareFile,
+  FirmwareFlashResult,
+  FirmwareMode,
+  FirmwarePhase,
+  FirmwareProgressEvent,
+  FirmwareRunItem,
+  FirmwareRunState,
+} from "./types/firmware";
 
 const { t, locale } = useI18n();
 
-// --- 类型定义 ---
-type DockPort = {
-  portName: string;
-  displayName: string;
-  serialNumber: string | null;
-};
+/** main.ts 中 provide；若缺失会在运行时报错 */
+const systemSettings = inject(SYSTEM_SETTINGS_INJECTION_KEY) as Ref<SystemSettings>;
 
-type DockInfo = {
-  project: string;
-  version: string;
-  mcu: string;
-  extra?: Record<string, unknown>;
-};
-
-type TrackerStatus = {
-  id: number;
-  inserted: boolean;
-  usbPath?: string;
-};
-
+// --- 仅 App 内部使用的类型 ---
 type UsbTopologyResult = {
   id: number;
   inserted: boolean;
@@ -61,57 +61,6 @@ type BlModeResponse = {
 
 type AutoSleepResponse = {
   enabled: boolean;
-};
-
-type FirmwarePhase =
-  | "idle"
-  | "ready"
-  | "entering_bl"
-  | "waiting_bootloader"
-  | "copying"
-  | "verifying"
-  | "success"
-  | "error";
-
-type FirmwareMode = "manual" | "auto_slot" | "batch_all";
-
-type FirmwareRunState =
-  | "idle"
-  | "waiting"
-  | "queued"
-  | "running"
-  | "success"
-  | "warning"
-  | "skipped"
-  | "error";
-
-type FirmwareRunItem = {
-  state: FirmwareRunState;
-  message: string;
-};
-
-type FirmwareFile = {
-  name: string;
-  size: number;
-  bytes: Uint8Array;
-};
-
-type FirmwareProgressEvent = {
-  trackerId: number;
-  phase: FirmwarePhase;
-  progress: number;
-  message: string;
-};
-
-type FirmwareFlashResult = {
-  trackerId: number;
-  success: boolean;
-  warning: boolean;
-  phase: FirmwarePhase;
-  progress: number;
-  message: string;
-  fileName: string;
-  drivePath?: string;
 };
 
 interface Notification {
@@ -579,7 +528,6 @@ async function selectFirmwareFile(file: File | null): Promise<void> {
     if (firmwareMode.value === "auto_slot" && autoUpdateEnabled.value) {
       armAutoUpdateWaitingState();
     }
-    pushLog(t("flashing.file_loaded_status", { name: file.name }), "success");
   } catch (error) {
     const message = getErrorMessage(error);
     firmwareFile.value = null;
@@ -620,7 +568,6 @@ async function runFirmwareFlashForTracker(trackerId: number): Promise<FirmwareFl
     firmwareProgress.value = result.progress;
     firmwareStatusMessage.value = message;
     setFirmwareRunItem(trackerId, result.warning ? "warning" : "success", message);
-    pushLog(message, result.warning ? "info" : "success");
     return result;
   } catch (error) {
     const message = getErrorMessage(error);
@@ -654,7 +601,6 @@ async function toggleAutoUpdate(): Promise<void> {
     firmwareProgress.value = 0;
     firmwarePhase.value = firmwareFile.value ? "ready" : "idle";
     firmwareStatusMessage.value = t("flashing.auto_disabled_status");
-    pushLog(firmwareStatusMessage.value, "info");
     return;
   }
   if (!connectedPortName.value) {
@@ -667,7 +613,6 @@ async function toggleAutoUpdate(): Promise<void> {
   }
   autoUpdateEnabled.value = true;
   armAutoUpdateWaitingState();
-  pushLog(firmwareStatusMessage.value, "info");
 }
 
 async function maybeTriggerAutoFirmwareUpdate(): Promise<void> {
@@ -695,7 +640,6 @@ async function maybeTriggerAutoFirmwareUpdate(): Promise<void> {
   const queuedMessage = t("flashing.auto_triggered_status", { id: trackerId, path: tracker.usbPath });
   setFirmwareRunItem(trackerId, "queued", queuedMessage);
   firmwareStatusMessage.value = queuedMessage;
-  pushLog(queuedMessage, "info");
 
   try {
     await runFirmwareFlashForTracker(trackerId);
@@ -729,7 +673,6 @@ async function startBatchFirmwareFlash(): Promise<void> {
   const insertedTrackers = firmwareSlotStatuses.value.filter((tracker) => tracker.inserted).map((tracker) => tracker.id);
   if (!insertedTrackers.length) {
     firmwareStatusMessage.value = t("flashing.batch_no_targets_status");
-    pushLog(firmwareStatusMessage.value, "info");
     return;
   }
 
@@ -864,9 +807,32 @@ const openDebug = async () => {
   await invoke("open_debug_window");
 };
 
-const toggleLocale = () => {
-  locale.value = locale.value === 'zh' ? 'en' : 'zh';
-};
+async function persistSystemSettings(): Promise<void> {
+  try {
+    await invoke("save_system_settings", {
+      settings: systemSettings.value,
+    });
+  } catch (error) {
+    pushLog(t("settings.save_failed", { msg: getErrorMessage(error) }), "error");
+  }
+}
+
+async function setLanguagePreference(pref: LanguagePreference): Promise<void> {
+  systemSettings.value = {
+    ...systemSettings.value,
+    languagePreference: pref,
+  };
+  locale.value = resolveLocaleFromPreference(pref);
+  await persistSystemSettings();
+}
+
+async function setDebugEnabled(enabled: boolean): Promise<void> {
+  systemSettings.value = {
+    ...systemSettings.value,
+    debugEnabled: enabled,
+  };
+  await persistSystemSettings();
+}
 
 // --- 生命周期 ---
 onMounted(async () => {
@@ -1000,14 +966,14 @@ onUnmounted(() => {
         @refresh-status="refreshTrackerStatus"
         @set-bl-mode="setBlMode"
         @set-auto-sleep="setAutoSleep"
-        @toggle-locale="toggleLocale"
-        @open-debug="openDebug"
       />
       <TrackerFlashing
         v-else-if="currentView === 'flashing'"
         :connected-port-name="connectedPortName"
+        :docks="docks"
+        :dock-info="dockInfo"
         :trackers="trackers"
-        :loading="loading"
+        :loading="uiBusy"
         :busy="firmwareBusy"
         :mode="firmwareMode"
         :auto-update-enabled="autoUpdateEnabled"
@@ -1028,8 +994,18 @@ onUnmounted(() => {
         @toggle-auto-update="toggleAutoUpdate"
         @start-batch-flash="startBatchFirmwareFlash"
         @refresh-status="refreshTrackerStatus"
+        @refresh-docks="refreshDocks"
+        @connect-dock="connectDock"
+        @disconnect-dock="disconnectDock"
       />
-      <Settings v-else-if="currentView === 'settings'" />
+      <Settings
+        v-else-if="currentView === 'settings'"
+        :language-preference="systemSettings.languagePreference"
+        :debug-enabled="systemSettings.debugEnabled"
+        @update:language-preference="setLanguagePreference"
+        @update:debug-enabled="setDebugEnabled"
+        @open-debug="openDebug"
+      />
     </div>
 
     <!-- 底部任务栏 -->
@@ -1165,8 +1141,8 @@ onUnmounted(() => {
 .progress-bar-container {
   width: 240px;
   height: 8px;
-  background: #f0f0f0;
-  border: 1px solid var(--color-primary);
+  background: var(--color-progress-track);
+  border: var(--border-width-subtle) solid var(--color-primary);
   border-radius: 0;
 }
 

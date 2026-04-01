@@ -24,9 +24,17 @@
   --color-success-hover: #cff0df;
   --color-error: #d83b01;
   --color-error-bg: #fde7e9;
-  
+
+  /* 扩展语义背景（与主面板/状态区对齐，避免组件内硬编码 hex） */
+  --color-bg-info-soft: #f3f9ff;
+  --color-bg-slot-idle: #eef7ff;
+  --color-spinner-track: #e8e8e8;
+  --color-progress-track: #ebebeb;
+
   /* 边框和阴影 */
   --border-width: 2px;
+  /* 次级分隔线、标签等（1px），主容器与交互控件仍用 --border-width */
+  --border-width-subtle: 1px;
   --border-radius: 0px;
   --border-color: var(--color-secondary);
   /* 与 outline 按钮一致的表单控件描边/悬停（下拉、文件选择等） */

@@ -1,3 +1,5 @@
+mod system_settings;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serialport::SerialPortType;
@@ -41,6 +43,10 @@ fn emit_debug_log(app_handle: &tauri::AppHandle, direction: &str, content: &str)
 
 const FOXDOCK_VID: u16 = 0x303A;
 const FOXDOCK_PID: u16 = 0x1001;
+/// Slime Smol USB CDC (matches `windows-driver/*.inf` and project naming).
+const SLIME_SMOL_VID: u16 = 0x1209;
+const SLIME_SMOL_TRACKER_PID: u16 = 0x7692;
+const SLIME_SMOL_RECEIVER_PID: u16 = 0x7690;
 const FOXDOCK_BAUD_RATE: u32 = 115_200;
 const DRIVE_TYPE_NO_ROOT_DIR: u32 = 1;
 const DRIVE_TYPE_REMOVABLE: u32 = 2;
@@ -229,8 +235,10 @@ fn list_matching_ports() -> Result<Vec<DockPort>, String> {
     for port in ports {
         if let SerialPortType::UsbPort(usb_info) = &port.port_type {
             if usb_info.vid == FOXDOCK_VID && usb_info.pid == FOXDOCK_PID {
-                let display_name = format_display_name(
+                let display_name = format_usb_serial_display_name(
                     &port.port_name,
+                    usb_info.vid,
+                    usb_info.pid,
                     usb_info.manufacturer.as_deref(),
                     usb_info.product.as_deref(),
                 );
@@ -247,6 +255,15 @@ fn list_matching_ports() -> Result<Vec<DockPort>, String> {
     Ok(result)
 }
 
+/// Fixed labels for USB serial devices (Windows INF + in-app fallback).
+fn usb_known_friendly_serial_label(vid: u16, pid: u16) -> Option<&'static str> {
+    match (vid, pid) {
+        (SLIME_SMOL_VID, SLIME_SMOL_TRACKER_PID) => Some("Slime Smol Tracker"),
+        (SLIME_SMOL_VID, SLIME_SMOL_RECEIVER_PID) => Some("Slime Smol Receiver"),
+        _ => None,
+    }
+}
+
 fn format_display_name(
     port_name: &str,
     manufacturer: Option<&str>,
@@ -258,6 +275,45 @@ fn format_display_name(
         (None, Some(p)) => format!("{port_name} - {p}"),
         (None, None) => port_name.to_string(),
     }
+}
+
+fn format_usb_serial_display_name(
+    port_name: &str,
+    vid: u16,
+    pid: u16,
+    manufacturer: Option<&str>,
+    product: Option<&str>,
+) -> String {
+    if let Some(label) = usb_known_friendly_serial_label(vid, pid) {
+        return format!("{port_name} - {label}");
+    }
+    format_display_name(port_name, manufacturer, product)
+}
+
+fn enumerate_slime_smol_serial_ports() -> Result<Vec<DockPort>, String> {
+    let ports = serialport::available_ports().map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+
+    for port in ports {
+        if let SerialPortType::UsbPort(usb_info) = &port.port_type {
+            if usb_known_friendly_serial_label(usb_info.vid, usb_info.pid).is_some() {
+                let display_name = format_usb_serial_display_name(
+                    &port.port_name,
+                    usb_info.vid,
+                    usb_info.pid,
+                    usb_info.manufacturer.as_deref(),
+                    usb_info.product.as_deref(),
+                );
+                result.push(DockPort {
+                    port_name: port.port_name.clone(),
+                    display_name,
+                    serial_number: usb_info.serial_number.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn extract_first_json(buffer: &mut Vec<u8>) -> Option<Value> {
@@ -1494,6 +1550,12 @@ fn discover_docks() -> Result<Vec<DockPort>, String> {
     list_matching_ports()
 }
 
+/// Enumerates Slime Smol Tracker / Receiver USB serial ports (`0x1209:0x7692` / `0x1209:0x7690`) with fixed display names.
+#[tauri::command]
+fn list_slime_smol_serial_ports() -> Result<Vec<DockPort>, String> {
+    enumerate_slime_smol_serial_ports()
+}
+
 #[tauri::command]
 fn get_app_version(app_handle: tauri::AppHandle) -> AppVersionInfo {
     let package_info = app_handle.package_info();
@@ -1511,6 +1573,7 @@ pub fn run() {
         .manage(FirmwareJobState::default())
         .invoke_handler(tauri::generate_handler![
             discover_docks,
+            list_slime_smol_serial_ports,
             connect_dock,
             disconnect_dock,
             get_connected_port,
@@ -1527,7 +1590,9 @@ pub fn run() {
             flash_tracker_firmware,
             open_debug_window,
             scan_usb_topology,
-            get_app_version
+            get_app_version,
+            system_settings::load_system_settings,
+            system_settings::save_system_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

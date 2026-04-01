@@ -11,7 +11,10 @@ withDefaults(defineProps<Props>(), {
 </script>
 
 <template>
-  <div class="base-spinner" :style="{ width: size, height: size, borderColor: '#f3f3f3', borderTopColor: color }"></div>
+  <div
+    class="base-spinner"
+    :style="{ width: size, height: size, borderColor: 'var(--color-spinner-track)', borderTopColor: color }"
+  />
 </template>
 
 <style scoped>

@@ -53,7 +53,7 @@ defineProps<{
 
 .notification-item.info {
   border-left: 6px solid var(--color-primary);
-  background: #f3f9ff;
+  background: var(--color-bg-info-soft);
 }
 
 .notification-item.success {

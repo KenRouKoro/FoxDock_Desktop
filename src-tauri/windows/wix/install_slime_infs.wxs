@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <!--
+    Post-install: register Slime Smol USB-serial INFs via pnputil (same paths as NSIS: INSTALLDIR\resources\windows-driver\).
+    Requires WixUtilExtension (WixQuietExec); Tauri candle adds -ext WixUtilExtension when this xmlns is present.
+  -->
+  <Fragment>
+    <CustomAction
+      Id="FoxDockSetSlimePnputilCmd"
+      Property="WixQuietExecCmdLine"
+      Value="&quot;[System64Folder]cmd.exe&quot; /c &quot;[System64Folder]pnputil.exe&quot; /add-driver &quot;[INSTALLDIR]resources\windows-driver\slime_smol_tracker.inf&quot; /install &amp;&amp; &quot;[System64Folder]pnputil.exe&quot; /add-driver &quot;[INSTALLDIR]resources\windows-driver\slime_smol_receiver.inf&quot; /install" />
+
+    <CustomAction
+      Id="FoxDockExecSlimePnputil"
+      BinaryKey="WixCA"
+      DllEntry="WixQuietExec"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+
+    <InstallExecuteSequence>
+      <Custom Action="FoxDockSetSlimePnputilCmd" After="InstallFiles">NOT REMOVE</Custom>
+      <Custom Action="FoxDockExecSlimePnputil" After="FoxDockSetSlimePnputilCmd">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

@@ -1,0 +1,38 @@
+; Slime Smol Receiver — USB CDC (usbser) friendly name
+; Hardware ID: VID_1209&PID_7690
+; Release builds: add CatalogFile=slime_smol.cat after Inf2Cat + Authenticode signing (see docs/DRIVER_SIGNING.md)
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Ports
+ClassGuid={4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider=%Provider%
+DriverVer=04/01/2026,1.0.0.0
+PnpLockdown=1
+
+[Manufacturer]
+%Provider%=SlimeSmolReceiver,NTamd64
+
+[SlimeSmolReceiver.NTamd64]
+%SlimeSmolReceiver.DeviceDesc%=SlimeSmolReceiver_Inst, USB\VID_1209&PID_7690
+
+[SlimeSmolReceiver_Inst.NT]
+Include=mdmcpq.inf
+CopyFiles=SlimeSmolReceiver_CopyFiles
+AddReg=SlimeSmolReceiver_AddReg
+
+[SlimeSmolReceiver_CopyFiles]
+usbser.sys
+
+[SlimeSmolReceiver_AddReg]
+HKR,,EnumPropPages32,,"msports.dll,SerialPortPropPageProvider"
+HKR,,DeviceCharacteristics,0x10001,0x100
+HKR,,FriendlyName,,%SlimeSmolReceiver.FriendlyName%
+
+[DestinationDirs]
+SlimeSmolReceiver_CopyFiles=12
+
+[Strings]
+Provider="FoxDock Desktop"
+SlimeSmolReceiver.DeviceDesc="Slime Smol Receiver"
+SlimeSmolReceiver.FriendlyName="Slime Smol Receiver"

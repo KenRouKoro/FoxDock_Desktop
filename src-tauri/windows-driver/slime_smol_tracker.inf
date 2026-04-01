@@ -1,0 +1,38 @@
+; Slime Smol Tracker — USB CDC (usbser) friendly name
+; Hardware ID: VID_1209&PID_7692
+; Release builds: add CatalogFile=slime_smol.cat after Inf2Cat + Authenticode signing (see docs/DRIVER_SIGNING.md)
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Ports
+ClassGuid={4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider=%Provider%
+DriverVer=04/01/2026,1.0.0.0
+PnpLockdown=1
+
+[Manufacturer]
+%Provider%=SlimeSmolTracker,NTamd64
+
+[SlimeSmolTracker.NTamd64]
+%SlimeSmolTracker.DeviceDesc%=SlimeSmolTracker_Inst, USB\VID_1209&PID_7692
+
+[SlimeSmolTracker_Inst.NT]
+Include=mdmcpq.inf
+CopyFiles=SlimeSmolTracker_CopyFiles
+AddReg=SlimeSmolTracker_AddReg
+
+[SlimeSmolTracker_CopyFiles]
+usbser.sys
+
+[SlimeSmolTracker_AddReg]
+HKR,,EnumPropPages32,,"msports.dll,SerialPortPropPageProvider"
+HKR,,DeviceCharacteristics,0x10001,0x100
+HKR,,FriendlyName,,%SlimeSmolTracker.FriendlyName%
+
+[DestinationDirs]
+SlimeSmolTracker_CopyFiles=12
+
+[Strings]
+Provider="FoxDock Desktop"
+SlimeSmolTracker.DeviceDesc="Slime Smol Tracker"
+SlimeSmolTracker.FriendlyName="Slime Smol Tracker"

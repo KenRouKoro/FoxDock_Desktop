@@ -23,6 +23,17 @@ export default {
     app_version: "App Version",
     close_btn: "Close"
   },
+  home: {
+    tab_trackers: "Slots",
+    tab_control: "Control",
+    connection_bar_label: "Dock connection",
+    connection_bar_expand: "Expand connection",
+    connection_bar_collapse: "Collapse connection",
+    tabs_aria_label: "Home content",
+    summary_disconnected: "Not connected",
+    summary_port: "Port: {port}",
+    summary_inserted: "{count} / 10 inserted"
+  },
   connection: {
     title: "Connection Management",
     select_port: "Please select dock port",
@@ -73,6 +84,11 @@ export default {
   },
   flashing: {
     title: "Firmware Management",
+    tabs_aria_label: "Firmware sections",
+    tab_config: "Task setup",
+    tab_status: "Run & queue",
+    connection_bar_label: "Dock connection & serial",
+    summary_inserted_1_5: "Slots 1–5 inserted: {count}",
     summary_title: "Dock",
     summary_disconnected: "Not connected",
     config_title: "Task setup",
@@ -156,7 +172,17 @@ export default {
   },
   settings: {
     title: "Settings",
-    placeholder: "Settings feature is under development..."
+    system_title: "System",
+    language_label: "Display language",
+    language_option_system: "Follow system",
+    language_option_zh: "Simplified Chinese",
+    language_option_en: "English",
+    debug_section_title: "Debug",
+    debug_section_hint:
+      "Open a separate window for serial TX/RX logs. The option below persists debug-related preferences.",
+    debug_enabled_label: "Enable debug extras",
+    open_debug_window: "Open debug window",
+    save_failed: "Failed to save settings: {msg}"
   },
   notifications: {
     scan_found: "Scanned {count} available docks",

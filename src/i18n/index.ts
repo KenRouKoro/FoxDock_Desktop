@@ -4,7 +4,8 @@ import en from './locales/en';
 
 const i18n = createI18n({
   legacy: false, // 使用 Composition API
-  locale: 'zh',  // 默认语言
+  /** 由 main.ts 在挂载前按持久化/系统语言覆盖 */
+  locale: 'en',
   fallbackLocale: 'en',
   messages: {
     zh,

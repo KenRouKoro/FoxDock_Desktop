@@ -65,6 +65,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 打包包含 windows-driver INF（见 bundle.resources）与 NSIS/WiX 安装后 pnputil 注册步骤
       - name: Build Tauri (Windows)
         run: pnpm tauri build
 
