@@ -65,9 +65,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # 打包包含 windows-driver INF（见 bundle.resources）与 NSIS/WiX 安装后 pnputil 注册步骤
+      # 若配置 Repository secrets：WINDOWS_CODE_SIGNING_PFX_BASE64 + WINDOWS_CODE_SIGNING_PFX_PASSWORD，
+      # 则自动导入证书并对 exe/安装包 Authenticode 签名；可选 Inf2Cat+签名 .cat（需 WDK/INF2CAT_EXE）。
+      # 见 docs/CI_SIGNING.md
       - name: Build Tauri (Windows)
-        run: pnpm tauri build
+        env:
+          WINDOWS_CODE_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_BASE64 }}
+          WINDOWS_CODE_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_PASSWORD }}
+          INF2CAT_EXE: ${{ vars.INF2CAT_EXE }}
+        shell: pwsh
+        run: ./scripts/ci/run-tauri-windows-build.ps1
 
       - name: Upload workflow artifacts (MSI + NSIS setup)
         uses: actions/upload-artifact@v4
