@@ -1,6 +1,6 @@
 [package]
 name = "foxdock-desktop"
-version = "0.0.0-dev.20260401.t023434.6c1cdfb"
+version = "0.0.0-dev.20260401.t024615.f64a99a"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

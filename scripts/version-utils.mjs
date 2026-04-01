@@ -135,3 +135,50 @@ export function deriveAppVersion(root) {
   }
   return `0.0.0-dev.${ymd}.${timeToken}.${hash}`;
 }
+
+/**
+ * WiX MSI `ProductVersion`：仅允许 `major.minor.patch.build`，且各段有上限（Tauri 与 Windows MSI 约束）。
+ * 与完整 SemVer 应用版本并行维护，写入 `bundle.windows.wix.version`，避免 prerelease 段触发 bundler 报错。
+ *
+ * @param {string} root 仓库根目录
+ * @returns {string} 例如 `0.0.0.27676` 或 `1.2.3.27676`
+ */
+export function deriveMsiProductVersion(root) {
+  const hash = getGitShortHash(root);
+  const build = buildNumber65535FromHash(hash);
+  const releaseTag = process.env[RELEASE_TAG_ENV]?.trim();
+  if (releaseTag) {
+    const parsed = parseGitHubReleaseTag(releaseTag);
+    const parts = parsed.core.split(".").map((x) => parseInt(x, 10));
+    const major = clampUint(parts[0] ?? 0, 255);
+    const minor = clampUint(parts[1] ?? 0, 255);
+    const patch = clampUint(parts[2] ?? 0, 65535);
+    return `${major}.${minor}.${patch}.${build}`;
+  }
+  return `0.0.0.${build}`;
+}
+
+/**
+ * @param {number} n
+ * @param {number} max
+ */
+function clampUint(n, max) {
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(Math.floor(n), max);
+}
+
+/**
+ * 用短哈希稳定映射到 0..65535（与 WiX 第四段一致）。
+ * @param {string} hash
+ */
+function buildNumber65535FromHash(hash) {
+  const hex = hash.replace(/[^0-9a-fA-F]/g, "");
+  if (hex.length >= 4) {
+    return parseInt(hex.slice(0, 4), 16) % 65536;
+  }
+  let n = 0;
+  for (let i = 0; i < hash.length; i++) {
+    n = (n * 31 + hash.charCodeAt(i)) >>> 0;
+  }
+  return n % 65536;
+}

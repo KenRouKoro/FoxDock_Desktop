@@ -5,15 +5,18 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deriveAppVersion } from "./version-utils.mjs";
+import { deriveAppVersion, deriveMsiProductVersion } from "./version-utils.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 
-function syncTauriConf(version) {
+function syncTauriConf(version, msiProductVersion) {
   const path = join(root, "src-tauri", "tauri.conf.json");
   const data = JSON.parse(readFileSync(path, "utf8"));
   data.version = version;
+  data.bundle = data.bundle ?? {};
+  data.bundle.windows = data.bundle.windows ?? {};
+  data.bundle.windows.wix = { ...(data.bundle.windows.wix ?? {}), version: msiProductVersion };
   writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf8");
 }
 
@@ -45,6 +48,7 @@ function syncCargoToml(version) {
 }
 
 const version = deriveAppVersion(root);
-syncTauriConf(version);
+const msiProductVersion = deriveMsiProductVersion(root);
+syncTauriConf(version, msiProductVersion);
 syncCargoToml(version);
-console.log(`sync-version: ${version} -> tauri.conf.json, Cargo.toml`);
+console.log(`sync-version: ${version} (MSI ${msiProductVersion}) -> tauri.conf.json, Cargo.toml`);
