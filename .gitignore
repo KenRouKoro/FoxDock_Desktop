@@ -15,7 +15,6 @@ dist-ssr
 project.md
 THEME_SPEC.md
 versioning.md
-pnpm-lock.yaml
 
 .trae/*
 .cursor/*
