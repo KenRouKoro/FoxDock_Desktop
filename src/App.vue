@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { computed, inject, ref, onMounted, onUnmounted, type Ref } from "vue";
+import {
+  computed,
+  inject,
+  markRaw,
+  onMounted,
+  onUnmounted,
+  ref,
+  shallowRef,
+  type Ref,
+} from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
@@ -108,7 +117,8 @@ const appUpdateStatusParams = ref<Record<string, unknown>>({});
 const appUpdateStatusText = computed(() =>
   t(appUpdateStatusKey.value, appUpdateStatusParams.value),
 );
-const pendingAppUpdate = ref<Awaited<ReturnType<typeof check>> | null>(null);
+/** Tauri Update 为带私有字段的类实例，勿放入深层响应式 ref，否则 downloadAndInstall 会报私有成员错误 */
+const pendingAppUpdate = shallowRef<Awaited<ReturnType<typeof check>> | null>(null);
 const firmwareBusy = ref(false);
 const firmwareTrackerId = ref(1);
 const firmwareFile = ref<FirmwareFile | null>(null);
@@ -889,7 +899,7 @@ async function checkForAppUpdate(options: { silentNoUpdate?: boolean } = {}): Pr
       }
       return;
     }
-    pendingAppUpdate.value = update;
+    pendingAppUpdate.value = markRaw(update);
     appUpdateAvailable.value = true;
     appUpdateVersion.value = update.version;
     setAppUpdateStatus("settings.update_status_available", {

@@ -11,14 +11,11 @@
 
 - 默认 INF **未** 包含 `CatalogFile=`，便于在未配置 WDK / 未签名目录包时本地与 CI 仍能完成应用构建。
 - **在 GitHub Actions 中自动签名**（安装包 + 可选驱动 `.cat`）的配置说明见 [CI_SIGNING.md](CI_SIGNING.md)。
-- 安装程序会在安装结束时调用 `pnputil /add-driver … /install` 将 INF 导入驱动存储。在 **无签名目录包** 时 `pnputil` 常会失败：安装器会**提示但继续完成应用安装**，INF 仍保留在安装目录的 `resources\windows-driver\` 下。
+- 安装包通过 `bundle.resources` **附带** `resources\windows-driver\` 下的 INF，**不在安装结束时自动执行** `pnputil`。需要系统级友好名称时，由用户或管理员按下文手动安装。
 
-### 管理员权限与「此时安装 INF」
+### 管理员权限与手动安装 INF
 
-- **NSIS**：`bundle.windows.nsis.installMode` 为 **`perMachine`** 时，Tauri 生成的安装程序使用 **`RequestExecutionLevel admin`**，用户通过 UAC 同意后，**整个安装（含 `POSTINSTALL` 钩子）在同一管理员上下文中执行**。钩子内直接调用 `pnputil`，**不需要**再 `RunAs` 提权（否则可能触发第二次 UAC）。安装脚本会优先使用 **64 位** `pnputil`（`System32`，在 32 位安装程序环境下必要时经 `Sysnative`），避免 WoW64 误用 32 位工具。
-- **MSI**：`pnputil` 放在 **deferred** 且 **`Impersonate="no"`** 的自定义动作中执行，通常以 **LocalSystem** 运行，权限高于普通管理员，同样满足向驱动存储添加包的要求。
-
-若仍失败，原因多为 **未签名的目录包策略**，而不是「没有管理员权限」。
+- 应用安装程序本身不再注册驱动包；若使用手动 `pnputil`，请在**管理员**命令提示符中执行（见下文「保留 INF 文件」）。
 
 ## 无商业 CA 证书时，还能怎么做？
 
