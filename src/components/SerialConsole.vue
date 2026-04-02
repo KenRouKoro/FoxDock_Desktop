@@ -9,11 +9,21 @@ import BaseSelect from "./ui/BaseSelect.vue";
 import type { DockPort } from "../types/dock";
 import type {
   SerialConsoleDeviceType,
+  SerialConsoleField,
+  SerialConsoleLocalCommand,
   SerialConsoleLog,
+  SerialConsoleRemoteCommand,
   SerialConsoleState,
   SerialConsoleTargetHint,
 } from "../types/serialConsole";
-import { getSerialConsoleCommands, getReceiverRemoteCommands } from "../utils/serialConsoleCommands";
+import {
+  getSerialConsoleCommands,
+  getReceiverRemoteCommands,
+  initParamFormValues,
+  remoteCommandUsesOnlyAll,
+  tryBuildLocalLine,
+  tryBuildRemoteTail,
+} from "../utils/serialConsoleCommands";
 
 const { t } = useI18n();
 const LOG_FLUSH_DELAY_MS = 500;
@@ -238,6 +248,15 @@ const statusText = ref("");
 const logContainer = ref<HTMLElement | null>(null);
 const initError = ref("");
 const pendingLogs = new Map<string, PendingConsoleLog>();
+
+/** 远程 send：全部 / 指定 id（0–255） */
+const remoteTargetChoice = ref<"all" | "id">("all");
+const remoteTargetId = ref(0);
+
+const paramModalOpen = ref(false);
+const paramModalScope = ref<"local" | "remote">("local");
+const paramModalCommand = ref<SerialConsoleLocalCommand | SerialConsoleRemoteCommand | null>(null);
+const paramFormValues = ref<Record<string, string | number | boolean>>({});
 
 let unlistenLog: (() => void) | null = null;
 let unlistenState: (() => void) | null = null;
@@ -481,6 +500,145 @@ async function sendText(commandOverride?: string): Promise<void> {
   }
 }
 
+function clampRemoteId(raw: number): number {
+  if (!Number.isFinite(raw)) return 0;
+  return Math.min(255, Math.max(0, Math.floor(raw)));
+}
+
+function getRemoteTargetToken(): string {
+  if (remoteTargetChoice.value === "all") return "all";
+  return String(clampRemoteId(remoteTargetId.value));
+}
+
+const paramModalFields = computed((): SerialConsoleField[] => {
+  const cmd = paramModalCommand.value;
+  if (!cmd || !paramModalOpen.value) return [];
+  if (paramModalScope.value === "local") {
+    const lc = cmd as SerialConsoleLocalCommand;
+    return lc.parametric?.fields ?? [];
+  }
+  const rc = cmd as SerialConsoleRemoteCommand;
+  return rc.parametric?.fields ?? [];
+});
+
+const paramPreview = computed(() => {
+  const cmd = paramModalCommand.value;
+  if (!cmd || !paramModalOpen.value) return { ok: true as const, text: "" };
+  if (paramModalScope.value === "local") {
+    const lc = cmd as SerialConsoleLocalCommand;
+    return tryBuildLocalLine(lc, paramFormValues.value);
+  }
+  const rc = cmd as SerialConsoleRemoteCommand;
+  const tail = tryBuildRemoteTail(rc, paramFormValues.value);
+  if (!tail.ok) return tail;
+  const tgt = remoteCommandUsesOnlyAll(rc) ? "all" : getRemoteTargetToken();
+  return { ok: true as const, text: `send ${tgt} ${tail.text}` };
+});
+
+function closeParamModal(): void {
+  paramModalOpen.value = false;
+  paramModalCommand.value = null;
+  paramFormValues.value = {};
+}
+
+function openLocalParamModal(cmd: SerialConsoleLocalCommand): void {
+  if (!cmd.parametric) return;
+  paramModalScope.value = "local";
+  paramModalCommand.value = cmd;
+  paramFormValues.value = initParamFormValues(cmd.parametric.fields);
+  paramModalOpen.value = true;
+}
+
+function openRemoteParamModal(cmd: SerialConsoleRemoteCommand): void {
+  if (!cmd.parametric) return;
+  paramModalScope.value = "remote";
+  paramModalCommand.value = cmd;
+  paramFormValues.value = initParamFormValues(cmd.parametric.fields);
+  paramModalOpen.value = true;
+}
+
+async function onQuickCommandClick(cmd: SerialConsoleLocalCommand): Promise<void> {
+  if (cmd.parametric) {
+    openLocalParamModal(cmd);
+    return;
+  }
+  if (cmd.command) {
+    await sendText(cmd.command);
+  }
+}
+
+async function onRemoteCommandClick(cmd: SerialConsoleRemoteCommand): Promise<void> {
+  if (cmd.parametric) {
+    openRemoteParamModal(cmd);
+    return;
+  }
+  const tail = cmd.remoteTail;
+  if (!tail) return;
+  const target = remoteCommandUsesOnlyAll(cmd) ? "all" : getRemoteTargetToken();
+  await sendText(`send ${target} ${tail}`);
+}
+
+async function submitParamModal(): Promise<void> {
+  const cmd = paramModalCommand.value;
+  if (!cmd) return;
+  const preview = paramPreview.value;
+  if (!preview.ok) {
+    setStatus(
+      preview.messageParams
+        ? t(preview.messageKey, preview.messageParams)
+        : t(preview.messageKey),
+    );
+    return;
+  }
+  await sendText(preview.text);
+  closeParamModal();
+}
+
+function fillInputFromParamModal(): void {
+  const preview = paramPreview.value;
+  if (!preview.ok) {
+    setStatus(
+      preview.messageParams
+        ? t(preview.messageKey, preview.messageParams)
+        : t(preview.messageKey),
+    );
+    return;
+  }
+  if (!preview.text.trim()) {
+    setStatus(t("serial_console.status_input_empty"));
+    return;
+  }
+  inputText.value = preview.text;
+  closeParamModal();
+  setStatus(t("serial_console.status_filled_input"));
+}
+
+function localCommandCodeHint(cmd: SerialConsoleLocalCommand): string {
+  if (cmd.command) return cmd.command;
+  return t("serial_console.parametric_hint");
+}
+
+function remoteCommandCodeHint(cmd: SerialConsoleRemoteCommand): string {
+  if (cmd.remoteTail) {
+    const target = remoteCommandUsesOnlyAll(cmd) ? "all" : getRemoteTargetToken();
+    return `send ${target} ${cmd.remoteTail}`;
+  }
+  return t("serial_console.parametric_hint");
+}
+
+function onParamBackdropClick(event: MouseEvent): void {
+  if ((event.target as HTMLElement).classList.contains("param-modal-backdrop")) {
+    closeParamModal();
+  }
+}
+
+function onParamModalKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && paramModalOpen.value) {
+    event.preventDefault();
+    closeParamModal();
+  }
+}
+
 function clearLogs(): void {
   clearPendingLogs();
   logs.value = [];
@@ -522,6 +680,7 @@ watch(
 );
 
 onMounted(async () => {
+  window.addEventListener("keydown", onParamModalKeydown);
   try {
     await loadConsoleState();
     await refreshPorts();
@@ -580,6 +739,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("keydown", onParamModalKeydown);
   flushAllPendingLogs();
   clearPendingLogs();
   if (unlistenLog) unlistenLog();
@@ -689,11 +849,11 @@ onUnmounted(() => {
               :key="command.key"
               class="command-btn"
               :disabled="!consoleState.connected"
-              :title="command.command"
-              @click="() => sendText(command.command)"
+              :title="localCommandCodeHint(command)"
+              @click="() => onQuickCommandClick(command)"
             >
               <span class="command-btn-label">{{ t(`serial_console.commands.${command.key}`) }}</span>
-              <code class="command-btn-code">{{ command.command }}</code>
+              <code class="command-btn-code">{{ localCommandCodeHint(command) }}</code>
             </button>
           </div>
         </BasePanel>
@@ -701,21 +861,147 @@ onUnmounted(() => {
 
       <aside v-if="remoteCommands.length" class="panel-remote">
         <BasePanel class="panel-commands" :title="t('serial_console.remote_commands_title')">
+          <div class="remote-target-row">
+            <span class="remote-target-label">{{ t("serial_console.remote_target_label") }}</span>
+            <BaseSelect v-model="remoteTargetChoice" class="remote-target-mode">
+              <option value="all">{{ t("serial_console.remote_target_all") }}</option>
+              <option value="id">{{ t("serial_console.remote_target_id") }}</option>
+            </BaseSelect>
+            <input
+              v-show="remoteTargetChoice === 'id'"
+              v-model.number="remoteTargetId"
+              class="remote-target-id-input"
+              type="number"
+              min="0"
+              max="255"
+              step="1"
+              :aria-label="t('serial_console.remote_target_id')"
+            />
+          </div>
+          <p v-if="remoteTargetChoice === 'id'" class="remote-target-hint">
+            {{ t("serial_console.remote_target_hint_id") }}
+          </p>
           <div class="command-list-scroll">
             <button
               v-for="command in remoteCommands"
               :key="command.key"
               class="command-btn"
               :disabled="!consoleState.connected"
-              :title="command.command"
-              @click="() => sendText(command.command)"
+              :title="remoteCommandCodeHint(command)"
+              @click="() => onRemoteCommandClick(command)"
             >
               <span class="command-btn-label">{{ t(`serial_console.commands.${command.key}`) }}</span>
-              <code class="command-btn-code">{{ command.command }}</code>
+              <code class="command-btn-code">{{ remoteCommandCodeHint(command) }}</code>
             </button>
           </div>
         </BasePanel>
       </aside>
+    </div>
+
+    <div
+      v-if="paramModalOpen"
+      class="param-modal-backdrop"
+      role="presentation"
+      @click="onParamBackdropClick"
+    >
+      <div
+        class="param-modal"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('serial_console.param_modal_title')"
+        @click.stop
+      >
+        <h3 class="param-modal-title">{{ t("serial_console.param_modal_title") }}</h3>
+        <p v-if="paramModalScope === 'remote'" class="param-modal-sub">
+          {{ t("serial_console.param_modal_remote_note") }}
+        </p>
+        <form class="param-modal-form" @submit.prevent="submitParamModal">
+          <div
+            v-for="field in paramModalFields"
+            :key="field.id"
+            class="param-field"
+          >
+            <label
+              v-if="field.kind !== 'toggle'"
+              class="param-field-label"
+              :for="`param-${field.id}`"
+              >{{ t(field.labelKey) }}</label
+            >
+            <template v-if="field.kind === 'text'">
+              <input
+                :id="`param-${field.id}`"
+                v-model="paramFormValues[field.id] as string"
+                class="param-field-control"
+                type="text"
+                :placeholder="
+                  field.placeholderKey ? t(field.placeholderKey) : undefined
+                "
+                autocomplete="off"
+              />
+            </template>
+            <template v-else-if="field.kind === 'number'">
+              <input
+                :id="`param-${field.id}`"
+                v-model="paramFormValues[field.id]"
+                class="param-field-control"
+                type="number"
+                :min="field.min"
+                :max="field.max"
+                :step="field.integer ? 1 : 'any'"
+              />
+            </template>
+            <template v-else-if="field.kind === 'select'">
+              <BaseSelect
+                :id="`param-${field.id}`"
+                v-model="paramFormValues[field.id] as string"
+                class="param-field-control param-field-select"
+              >
+                <option
+                  v-for="opt in field.options"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ t(opt.labelKey) }}
+                </option>
+              </BaseSelect>
+            </template>
+            <template v-else-if="field.kind === 'toggle'">
+              <label class="param-toggle-row" :for="`param-${field.id}`">
+                <input
+                  :id="`param-${field.id}`"
+                  v-model="paramFormValues[field.id] as boolean"
+                  type="checkbox"
+                />
+                <span>{{ t(field.labelKey) }}</span>
+              </label>
+            </template>
+          </div>
+          <div class="param-preview">
+            <span class="param-preview-label">{{ t("serial_console.param_preview") }}</span>
+            <code class="param-preview-code">{{
+              paramPreview.ok ? paramPreview.text : "—"
+            }}</code>
+            <p v-if="!paramPreview.ok" class="param-preview-error">
+              {{
+                paramPreview.messageParams
+                  ? t(paramPreview.messageKey, paramPreview.messageParams)
+                  : t(paramPreview.messageKey)
+              }}
+            </p>
+          </div>
+          <div class="param-modal-actions">
+            <BaseButton type="button" variant="outline" @click="closeParamModal">
+              {{ t("serial_console.param_modal_cancel") }}
+            </BaseButton>
+            <BaseButton type="button" variant="outline" @click="fillInputFromParamModal">
+              {{ t("serial_console.fill") }}
+            </BaseButton>
+            <BaseButton type="submit" :disabled="!consoleState.connected">
+              {{ t("serial_console.send_now") }}
+            </BaseButton>
+          </div>
+        </form>
+      </div>
     </div>
   </main>
 </template>
@@ -1200,6 +1486,164 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.remote-target-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-xs);
+}
+
+.remote-target-label {
+  font-size: 13px;
+  color: var(--color-text-light);
+  flex: 0 0 auto;
+}
+
+.remote-target-mode {
+  flex: 1 1 120px;
+  min-width: 100px;
+  max-width: 160px;
+}
+
+.remote-target-id-input {
+  width: 72px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: var(--border-width) solid var(--color-border-control);
+  border-radius: var(--border-radius);
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.remote-target-hint {
+  margin: 0 0 var(--spacing-sm);
+  font-size: 12px;
+  color: var(--color-text-light);
+}
+
+.param-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-md);
+  box-sizing: border-box;
+}
+
+.param-modal {
+  width: min(440px, 100%);
+  max-height: min(90vh, 640px);
+  overflow: auto;
+  background: var(--color-bg-white);
+  color: var(--color-text-main);
+  border: var(--border-width) solid var(--color-secondary);
+  border-radius: var(--border-radius);
+  padding: var(--spacing-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.param-modal-title {
+  margin: 0 0 var(--spacing-xs);
+  font-size: 18px;
+}
+
+.param-modal-sub {
+  margin: 0 0 var(--spacing-sm);
+  font-size: 13px;
+  color: var(--color-text-light);
+}
+
+.param-modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.param-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.param-field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.param-field-control {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: var(--border-width) solid var(--color-border-control);
+  border-radius: var(--border-radius);
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.param-field-control:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.param-field-select {
+  padding: 0;
+}
+
+.param-field-select :deep(.base-select) {
+  width: 100%;
+}
+
+.param-toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--color-text-main);
+}
+
+.param-preview {
+  margin-top: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  background: var(--color-bg-header);
+  border: var(--border-width) solid var(--color-border-control);
+  border-radius: var(--border-radius);
+}
+
+.param-preview-label {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-light);
+  margin-bottom: 4px;
+}
+
+.param-preview-code {
+  display: block;
+  font-family: var(--font-family-mono);
+  font-size: 13px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.param-preview-error {
+  margin: var(--spacing-xs) 0 0;
+  font-size: 12px;
+  color: var(--color-error);
+}
+
+.param-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
 }
 
 </style>

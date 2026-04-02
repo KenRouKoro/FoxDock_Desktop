@@ -1,11 +1,13 @@
 mod system_settings;
 mod usb_build_info;
 mod window_docking;
+#[cfg(windows)]
+mod windows_serial_friendly;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serialport::SerialPortType;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -362,6 +364,33 @@ fn format_usb_serial_display_name(
     format_display_name(port_name, manufacturer, product)
 }
 
+/// Windows: COM port -> bus-reported description (or friendly name). Empty on other OS.
+fn slime_smol_windows_port_label_map() -> HashMap<String, String> {
+    #[cfg(windows)]
+    {
+        windows_serial_friendly::slime_smol_port_bus_reported_map()
+    }
+    #[cfg(not(windows))]
+    {
+        HashMap::new()
+    }
+}
+
+/// Prefer Windows bus-reported / friendly name for Slime Smol serial; else USB descriptor / fixed label.
+fn format_slime_smol_serial_display_name(
+    port_name: &str,
+    vid: u16,
+    pid: u16,
+    manufacturer: Option<&str>,
+    product: Option<&str>,
+    windows_label: Option<&str>,
+) -> String {
+    if let Some(label) = windows_label.map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("{port_name} - {label}");
+    }
+    format_usb_serial_display_name(port_name, vid, pid, manufacturer, product)
+}
+
 fn serial_console_device_pid(device_type: SerialConsoleDeviceType) -> u16 {
     match device_type {
         SerialConsoleDeviceType::Tracker => SLIME_SMOL_TRACKER_PID,
@@ -374,6 +403,7 @@ fn enumerate_slime_smol_serial_ports_filtered(
 ) -> Result<Vec<DockPort>, String> {
     let ports = serialport::available_ports().map_err(|e| e.to_string())?;
     let mut result = Vec::new();
+    let win_labels = slime_smol_windows_port_label_map();
 
     for port in ports {
         if let SerialPortType::UsbPort(usb_info) = &port.port_type {
@@ -385,12 +415,16 @@ fn enumerate_slime_smol_serial_ports_filtered(
                 None => usb_known_friendly_serial_label(usb_info.vid, usb_info.pid).is_some(),
             };
             if device_matches {
-                let display_name = format_usb_serial_display_name(
+                let windows_label = win_labels
+                    .get(&port.port_name.to_uppercase())
+                    .map(String::as_str);
+                let display_name = format_slime_smol_serial_display_name(
                     &port.port_name,
                     usb_info.vid,
                     usb_info.pid,
                     usb_info.manufacturer.as_deref(),
                     usb_info.product.as_deref(),
+                    windows_label,
                 );
                 result.push(DockPort {
                     port_name: port.port_name.clone(),

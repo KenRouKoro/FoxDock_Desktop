@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "foxdock-desktop"
-version = "0.0.0-dev.20260402.t054847.bb21cfb"
+version = "0.0.0-dev.20260402.t091434.7882e75"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
