@@ -41,6 +41,7 @@ const emit = defineEmits<{
   (e: "checkUpdate"): void;
   (e: "installUpdate"): void;
   (e: "openDebug"): void;
+  (e: "openSerialConsole"): void;
   (e: "redockWindows"): void;
 }>();
 
@@ -111,7 +112,7 @@ function onSnapStyleApproximationToggle(event: Event) {
             <span class="setting-label">{{ t("settings.debug_section_title") }}</span>
             <p class="setting-hint">{{ t("settings.debug_section_hint") }}</p>
           </div>
-          <div class="setting-debug-actions">
+          <div class="setting-debug-block">
             <label class="checkbox-row">
               <input
                 type="checkbox"
@@ -121,9 +122,14 @@ function onSnapStyleApproximationToggle(event: Event) {
               />
               <span>{{ t("settings.debug_enabled_label") }}</span>
             </label>
-            <BaseButton variant="debug" @click="emit('openDebug')">
-              {{ t("settings.open_debug_window") }}
-            </BaseButton>
+            <div class="setting-debug-actions">
+              <BaseButton variant="outline" @click="emit('openDebug')">
+                {{ t("settings.open_debug_window") }}
+              </BaseButton>
+              <BaseButton variant="outline" @click="emit('openSerialConsole')">
+                {{ t("settings.open_serial_console_window") }}
+              </BaseButton>
+            </div>
           </div>
         </div>
 
@@ -172,7 +178,7 @@ function onSnapStyleApproximationToggle(event: Event) {
           </div>
           <div class="setting-debug-actions">
             <BaseButton
-              variant="secondary"
+              variant="outline"
               :disabled="props.windowDockingBusy"
               @click="emit('redockWindows')"
             >
@@ -222,7 +228,7 @@ function onSnapStyleApproximationToggle(event: Event) {
           </div>
           <div class="setting-debug-actions">
             <BaseButton
-              variant="secondary"
+              variant="outline"
               :disabled="props.updateChecking || props.updateInstalling"
               @click="emit('checkUpdate')"
             >
@@ -234,7 +240,7 @@ function onSnapStyleApproximationToggle(event: Event) {
             </BaseButton>
             <BaseButton
               v-if="props.updateAvailable"
-              variant="debug"
+              variant="primary"
               :disabled="props.updateChecking || props.updateInstalling"
               @click="emit('installUpdate')"
             >
@@ -309,6 +315,13 @@ function onSnapStyleApproximationToggle(event: Event) {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--spacing-md);
+}
+
+.setting-debug-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
 }
 
 .checkbox-row {

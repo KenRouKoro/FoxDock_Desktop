@@ -1,0 +1,106 @@
+import type {
+  SerialConsoleCommand,
+  SerialConsoleDeviceType,
+} from "../types/serialConsole";
+
+const trackerCommands: SerialConsoleCommand[] = [
+  { key: "help", command: "help" },
+  { key: "info", command: "info" },
+  { key: "uptime", command: "uptime" },
+  { key: "battery", command: "battery" },
+  { key: "scan", command: "scan" },
+  { key: "calibrate", command: "calibrate" },
+  { key: "6side", command: "6-side" },
+  { key: "mag_on", command: "mag on" },
+  { key: "mag_off", command: "mag off" },
+  { key: "mag_clear", command: "mag clear" },
+  { key: "mag_cal", command: "mag cal" },
+  { key: "sens_reset", command: "sens reset" },
+  { key: "tcal_status", command: "tcal status" },
+  { key: "tcal_clear", command: "tcal clear" },
+  { key: "tcal_dump", command: "tcal dump" },
+  { key: "tcal_auto_on", command: "tcal auto on" },
+  { key: "tcal_auto_off", command: "tcal auto off" },
+  { key: "tcal_boot_on", command: "tcal boot on" },
+  { key: "tcal_boot_off", command: "tcal boot off" },
+  { key: "tdma_on", command: "tdma on" },
+  { key: "tdma_off", command: "tdma off" },
+  { key: "pair", command: "pair" },
+  { key: "clear", command: "clear" },
+  { key: "clearchannel", command: "clearchannel" },
+  { key: "reboot", command: "reboot" },
+  { key: "dfu", command: "dfu" },
+  { key: "ping", command: "ping" },
+  { key: "meow", command: "meow" },
+  { key: "reset_zro", command: "reset zro" },
+  { key: "reset_acc", command: "reset acc" },
+  { key: "reset_mag", command: "reset mag" },
+  { key: "reset_sens", command: "reset sens" },
+  { key: "reset_tcal", command: "reset tcal" },
+  { key: "reset_bat", command: "reset bat" },
+  { key: "reset_fusion", command: "reset fusion" },
+  { key: "reset_all", command: "reset all" },
+];
+
+const receiverCommands: SerialConsoleCommand[] = [
+  { key: "help", command: "help" },
+  { key: "info", command: "info" },
+  { key: "uptime", command: "uptime" },
+  { key: "list", command: "list" },
+  { key: "pair", command: "pair" },
+  { key: "exit", command: "exit" },
+  { key: "clear", command: "clear" },
+  { key: "stats", command: "stats" },
+  { key: "resetstats", command: "resetstats" },
+  { key: "rssi_scan", command: "rssi_scan" },
+  { key: "clearchannel", command: "clearchannel" },
+  { key: "reboot", command: "reboot" },
+  { key: "dfu", command: "dfu" },
+  { key: "meow", command: "meow" },
+];
+
+const receiverRemoteCommands: SerialConsoleCommand[] = [
+  { key: "remote_shutdown", command: "send all shutdown" },
+  { key: "remote_calibrate", command: "send all calibrate" },
+  { key: "remote_6side", command: "send all 6-side" },
+  { key: "remote_reboot", command: "send all reboot" },
+  { key: "remote_dfu", command: "send all dfu" },
+  { key: "remote_scan", command: "send all scan" },
+  { key: "remote_ping", command: "send all ping" },
+  { key: "remote_meow", command: "send all meow" },
+  { key: "remote_clear", command: "send all clear" },
+  { key: "remote_fusion", command: "send all fusion" },
+  { key: "remote_mag_on", command: "send all mag on" },
+  { key: "remote_mag_off", command: "send all mag off" },
+  { key: "remote_mag_clear", command: "send all mag clear" },
+  { key: "remote_mag_cal", command: "send all mag cal" },
+  { key: "remote_clearchannel", command: "send all clearchannel" },
+  { key: "remote_sens_reset", command: "send all sens reset" },
+  { key: "remote_tcal_on", command: "send all tcal on" },
+  { key: "remote_tcal_off", command: "send all tcal off" },
+  { key: "remote_tcal_auto_on", command: "send all tcal auto on" },
+  { key: "remote_tcal_auto_off", command: "send all tcal auto off" },
+  { key: "remote_tcal_boot_on", command: "send all tcal boot on" },
+  { key: "remote_tcal_boot_off", command: "send all tcal boot off" },
+  { key: "remote_tcal_clear", command: "send all tcal clear" },
+  { key: "remote_tdma_on", command: "send all tdma on" },
+  { key: "remote_tdma_off", command: "send all tdma off" },
+  { key: "remote_test_on", command: "send all test on" },
+  { key: "remote_test_off", command: "send all test off" },
+  { key: "remote_reset_zro", command: "send all reset zro" },
+  { key: "remote_reset_acc", command: "send all reset acc" },
+  { key: "remote_reset_mag", command: "send all reset mag" },
+  { key: "remote_reset_bat", command: "send all reset bat" },
+  { key: "remote_reset_tcal", command: "send all reset tcal" },
+  { key: "remote_reset_fusion", command: "send all reset fusion" },
+];
+
+export function getSerialConsoleCommands(
+  deviceType: SerialConsoleDeviceType,
+): SerialConsoleCommand[] {
+  return deviceType === "receiver" ? receiverCommands : trackerCommands;
+}
+
+export function getReceiverRemoteCommands(): SerialConsoleCommand[] {
+  return receiverRemoteCommands;
+}

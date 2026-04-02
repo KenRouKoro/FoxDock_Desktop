@@ -2,11 +2,13 @@
 interface Props {
   variant?: 'primary' | 'secondary' | 'outline' | 'debug';
   disabled?: boolean;
+  type?: 'button' | 'submit' | 'reset';
 }
 
 withDefaults(defineProps<Props>(), {
   variant: 'primary',
   disabled: false,
+  type: 'button',
 });
 
 const emit = defineEmits<{
@@ -18,6 +20,7 @@ const emit = defineEmits<{
   <button
     class="base-button"
     :class="[`variant-${variant}`]"
+    :type="type"
     :disabled="disabled"
     @click="emit('click', $event)"
   >

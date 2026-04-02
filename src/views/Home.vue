@@ -6,6 +6,10 @@ import TrackerStatusComponent from "../components/TrackerStatus.vue";
 import TrackerControl from "../components/TrackerControl.vue";
 import logoUrl from "../assets/FoxApplication.png";
 import type { DockInfo, DockPort, TrackerStatus } from "../types/dock";
+import type {
+  ReceiverStatus,
+  SerialConsoleTargetHint,
+} from "../types/serialConsole";
 
 const { t } = useI18n();
 
@@ -14,6 +18,7 @@ const props = defineProps<{
   connectedPortName: string;
   dockInfo: DockInfo | null;
   trackers: TrackerStatus[];
+  receiverStatus: ReceiverStatus;
   ledEnabled: boolean;
   loading: boolean;
   blMode: number | null;
@@ -32,6 +37,7 @@ const emit = defineEmits<{
   (e: "refreshStatus"): void;
   (e: "setBlMode", mode: number): void;
   (e: "setAutoSleep", enabled: boolean): void;
+  (e: "openSerialConsole", targetHint: SerialConsoleTargetHint): void;
 }>();
 
 type HomeTab = "trackers" | "control";
@@ -163,8 +169,10 @@ function toggleConnectionPanel() {
       <div v-show="activeTab === 'trackers'" role="tabpanel">
         <TrackerStatusComponent
           :trackers="trackers"
+          :receiver-status="receiverStatus"
           :disabled="loading || !connectedPortName"
           @run-single-action="(action, id) => emit('runSingleAction', action, id)"
+          @open-serial-console="(targetHint) => emit('openSerialConsole', targetHint)"
         />
       </div>
       <div v-show="activeTab === 'control'" role="tabpanel">

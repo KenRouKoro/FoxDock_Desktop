@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc as std_mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tauri::{Emitter, Manager, State, WindowEvent};
@@ -86,6 +86,74 @@ impl Default for DockConnectionState {
             command_guard: AsyncMutex::new(()),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum SerialConsoleDeviceType {
+    Tracker,
+    Receiver,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SerialConsoleTargetHint {
+    device_type: SerialConsoleDeviceType,
+    tracker_id: Option<u8>,
+}
+
+impl Default for SerialConsoleTargetHint {
+    fn default() -> Self {
+        Self {
+            device_type: SerialConsoleDeviceType::Tracker,
+            tracker_id: None,
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SerialConsoleStatePayload {
+    connected: bool,
+    port_name: Option<String>,
+    display_name: Option<String>,
+    device_type: SerialConsoleDeviceType,
+    tracker_id: Option<u8>,
+}
+
+struct SerialConsoleRuntime {
+    port_name: String,
+    display_name: String,
+    device_type: SerialConsoleDeviceType,
+    tracker_id: Option<u8>,
+    write_tx: std_mpsc::Sender<Vec<u8>>,
+    shutdown_tx: std_mpsc::Sender<()>,
+    thread_handle: JoinHandle<()>,
+    alive: Arc<AtomicBool>,
+}
+
+struct SerialConsoleState {
+    runtime: Mutex<Option<SerialConsoleRuntime>>,
+    target_hint: Mutex<SerialConsoleTargetHint>,
+    connection_guard: AsyncMutex<()>,
+}
+
+impl Default for SerialConsoleState {
+    fn default() -> Self {
+        Self {
+            runtime: Mutex::new(None),
+            target_hint: Mutex::new(SerialConsoleTargetHint::default()),
+            connection_guard: AsyncMutex::new(()),
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ReceiverSerialStatus {
+    inserted: bool,
+    port_name: Option<String>,
+    display_name: Option<String>,
 }
 
 struct FirmwareJobState {
@@ -294,13 +362,29 @@ fn format_usb_serial_display_name(
     format_display_name(port_name, manufacturer, product)
 }
 
-fn enumerate_slime_smol_serial_ports() -> Result<Vec<DockPort>, String> {
+fn serial_console_device_pid(device_type: SerialConsoleDeviceType) -> u16 {
+    match device_type {
+        SerialConsoleDeviceType::Tracker => SLIME_SMOL_TRACKER_PID,
+        SerialConsoleDeviceType::Receiver => SLIME_SMOL_RECEIVER_PID,
+    }
+}
+
+fn enumerate_slime_smol_serial_ports_filtered(
+    device_type: Option<SerialConsoleDeviceType>,
+) -> Result<Vec<DockPort>, String> {
     let ports = serialport::available_ports().map_err(|e| e.to_string())?;
     let mut result = Vec::new();
 
     for port in ports {
         if let SerialPortType::UsbPort(usb_info) = &port.port_type {
-            if usb_known_friendly_serial_label(usb_info.vid, usb_info.pid).is_some() {
+            let device_matches = match device_type {
+                Some(target) => {
+                    usb_info.vid == SLIME_SMOL_VID
+                        && usb_info.pid == serial_console_device_pid(target)
+                }
+                None => usb_known_friendly_serial_label(usb_info.vid, usb_info.pid).is_some(),
+            };
+            if device_matches {
                 let display_name = format_usb_serial_display_name(
                     &port.port_name,
                     usb_info.vid,
@@ -318,6 +402,10 @@ fn enumerate_slime_smol_serial_ports() -> Result<Vec<DockPort>, String> {
     }
 
     Ok(result)
+}
+
+fn enumerate_slime_smol_serial_ports() -> Result<Vec<DockPort>, String> {
+    enumerate_slime_smol_serial_ports_filtered(None)
 }
 
 fn extract_first_json(buffer: &mut Vec<u8>) -> Option<Value> {
@@ -497,6 +585,139 @@ async fn close_dock_connection(state: &State<'_, DockConnectionState>) -> Result
             .map_err(|e| e.to_string())??;
     }
     Ok(())
+}
+
+fn build_serial_console_state_payload(
+    state: &State<'_, SerialConsoleState>,
+) -> Result<SerialConsoleStatePayload, String> {
+    let target_hint = state.target_hint.lock().map_err(|e| e.to_string())?.clone();
+    let runtime_guard = state.runtime.lock().map_err(|e| e.to_string())?;
+    let Some(runtime) = runtime_guard.as_ref() else {
+        return Ok(SerialConsoleStatePayload {
+            connected: false,
+            port_name: None,
+            display_name: None,
+            device_type: target_hint.device_type,
+            tracker_id: target_hint.tracker_id,
+        });
+    };
+
+    let connected = runtime.alive.load(Ordering::Acquire);
+    Ok(SerialConsoleStatePayload {
+        connected,
+        port_name: connected.then(|| runtime.port_name.clone()),
+        display_name: connected.then(|| runtime.display_name.clone()),
+        device_type: runtime.device_type,
+        tracker_id: runtime.tracker_id,
+    })
+}
+
+fn emit_serial_console_state(
+    app_handle: &tauri::AppHandle,
+    state: &State<'_, SerialConsoleState>,
+) -> Result<(), String> {
+    let payload = build_serial_console_state_payload(state)?;
+    let _ = app_handle.emit_to("serial-console", "serial-console-state", payload);
+    Ok(())
+}
+
+fn emit_serial_console_target_hint(app_handle: &tauri::AppHandle, hint: &SerialConsoleTargetHint) {
+    let _ = app_handle.emit_to("serial-console", "serial-console-target-hint", hint.clone());
+}
+
+fn emit_serial_console_log(app_handle: &tauri::AppHandle, direction: &str, content: &str) {
+    let _ = app_handle.emit_to(
+        "serial-console",
+        "serial-console-log",
+        DebugLog {
+            direction: direction.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+        },
+    );
+}
+
+fn take_serial_console_runtime(
+    state: &State<'_, SerialConsoleState>,
+) -> Result<Option<SerialConsoleRuntime>, String> {
+    let mut guard = state.runtime.lock().map_err(|e| e.to_string())?;
+    Ok(guard.take())
+}
+
+fn close_serial_console_runtime(runtime: SerialConsoleRuntime) -> Result<(), String> {
+    runtime.alive.store(false, Ordering::Release);
+    let _ = runtime.shutdown_tx.send(());
+    drop(runtime.write_tx);
+    runtime
+        .thread_handle
+        .join()
+        .map_err(|_| i18n_error("backend_errors.serial_manager_join_failed"))
+}
+
+async fn close_serial_console_connection(
+    app_handle: &tauri::AppHandle,
+    state: &State<'_, SerialConsoleState>,
+) -> Result<(), String> {
+    let _guard = state.connection_guard.lock().await;
+    if let Some(runtime) = take_serial_console_runtime(state)? {
+        tokio::task::spawn_blocking(move || close_serial_console_runtime(runtime))
+            .await
+            .map_err(|e| e.to_string())??;
+    }
+    emit_serial_console_state(app_handle, state)?;
+    Ok(())
+}
+
+fn spawn_serial_console_manager(
+    app_handle: tauri::AppHandle,
+    mut port: Box<dyn serialport::SerialPort>,
+    write_rx: std_mpsc::Receiver<Vec<u8>>,
+    shutdown_rx: std_mpsc::Receiver<()>,
+    alive: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut read_chunk = [0_u8; 1024];
+
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                emit_serial_console_log(&app_handle, "SYS", "Serial console received shutdown signal.\n");
+                break;
+            }
+
+            while let Ok(payload) = write_rx.try_recv() {
+                let content = String::from_utf8_lossy(&payload).to_string();
+                emit_serial_console_log(&app_handle, "TX", &content);
+                if let Err(error) = port.write_all(&payload) {
+                    emit_serial_console_log(&app_handle, "SYS", &format!("Write failed: {error}\n"));
+                    alive.store(false, Ordering::Release);
+                    return;
+                }
+                let _ = port.flush();
+            }
+
+            match port.read(&mut read_chunk) {
+                Ok(read_len) if read_len > 0 => {
+                    let content = String::from_utf8_lossy(&read_chunk[..read_len]).to_string();
+                    emit_serial_console_log(&app_handle, "RX", &content);
+                }
+                Ok(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    emit_serial_console_log(&app_handle, "SYS", &format!("Read failed: {error}\n"));
+                    break;
+                }
+            }
+        }
+
+        alive.store(false, Ordering::Release);
+        emit_serial_console_log(&app_handle, "SYS", "Serial console disconnected.\n");
+        let state = app_handle.state::<SerialConsoleState>();
+        let _ = emit_serial_console_state(&app_handle, &state);
+    })
 }
 
 fn parse_info_response(value: Value) -> Result<DockInfo, String> {
@@ -1602,6 +1823,55 @@ async fn open_debug_window(app_handle: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_serial_console_window(
+    app_handle: tauri::AppHandle,
+    target_hint: SerialConsoleTargetHint,
+) -> Result<(), String> {
+    {
+        let state = app_handle.state::<SerialConsoleState>();
+        let mut hint_guard = state.target_hint.lock().map_err(|e| e.to_string())?;
+        *hint_guard = target_hint.clone();
+    }
+
+    let device_type = match target_hint.device_type {
+        SerialConsoleDeviceType::Tracker => "tracker",
+        SerialConsoleDeviceType::Receiver => "receiver",
+    };
+    let mut url = format!("/?serialConsole=true&deviceType={device_type}");
+    if let Some(tracker_id) = target_hint.tracker_id {
+        url.push_str(&format!("&trackerId={tracker_id}"));
+    }
+
+    let serial_console_window = tauri::WebviewWindowBuilder::new(
+        &app_handle,
+        "serial-console",
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title("Serial Console")
+    .inner_size(1180.0, 720.0)
+    .resizable(true)
+    .build();
+
+    match serial_console_window {
+        Ok(window) => {
+            let _ = window.maximize();
+            let _ = window.set_focus();
+            emit_serial_console_target_hint(&app_handle, &target_hint);
+            Ok(())
+        }
+        Err(_) => {
+            if let Some(window) = app_handle.get_webview_window("serial-console") {
+                let _ = window.set_focus();
+                emit_serial_console_target_hint(&app_handle, &target_hint);
+                Ok(())
+            } else {
+                Err(i18n_error("backend_errors.open_serial_console_window_failed"))
+            }
+        }
+    }
+}
+
+#[tauri::command]
 fn discover_docks() -> Result<Vec<DockPort>, String> {
     list_matching_ports()
 }
@@ -1610,6 +1880,141 @@ fn discover_docks() -> Result<Vec<DockPort>, String> {
 #[tauri::command]
 fn list_slime_smol_serial_ports() -> Result<Vec<DockPort>, String> {
     enumerate_slime_smol_serial_ports()
+}
+
+#[tauri::command]
+async fn list_serial_console_ports(
+    device_type: SerialConsoleDeviceType,
+) -> Result<Vec<DockPort>, String> {
+    tokio::task::spawn_blocking(move || {
+        enumerate_slime_smol_serial_ports_filtered(Some(device_type))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_receiver_serial_status() -> Result<ReceiverSerialStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let port =
+            enumerate_slime_smol_serial_ports_filtered(Some(SerialConsoleDeviceType::Receiver))?
+                .into_iter()
+                .next();
+        Ok(ReceiverSerialStatus {
+            inserted: port.is_some(),
+            port_name: port.as_ref().map(|item| item.port_name.clone()),
+            display_name: port.as_ref().map(|item| item.display_name.clone()),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_serial_console_state(
+    app_handle: tauri::AppHandle,
+) -> Result<SerialConsoleStatePayload, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<SerialConsoleState>();
+        build_serial_console_state_payload(&state)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn connect_serial_console(
+    app_handle: tauri::AppHandle,
+    state: State<'_, SerialConsoleState>,
+    port_name: String,
+    device_type: SerialConsoleDeviceType,
+) -> Result<DockPort, String> {
+    close_serial_console_connection(&app_handle, &state).await?;
+
+    let available = enumerate_slime_smol_serial_ports_filtered(Some(device_type))?;
+    let selected = available
+        .iter()
+        .find(|p| p.port_name == port_name)
+        .cloned()
+        .ok_or_else(|| i18n_error("backend_errors.port_not_found"))?;
+
+    let mut port = serialport::new(&port_name, FOXDOCK_BAUD_RATE)
+        .timeout(Duration::from_millis(100))
+        .open()
+        .map_err(|e| {
+            i18n_error_with_params(
+                "backend_errors.open_serial_failed",
+                json!({ "error": e.to_string() }),
+            )
+        })?;
+    let _ = port.write_data_terminal_ready(true);
+
+    let (write_tx, write_rx) = std_mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = std_mpsc::channel();
+    let alive = Arc::new(AtomicBool::new(true));
+    let thread_handle = spawn_serial_console_manager(
+        app_handle.clone(),
+        port,
+        write_rx,
+        shutdown_rx,
+        alive.clone(),
+    );
+
+    let tracker_id = state
+        .target_hint
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .tracker_id
+        .filter(|_| device_type == SerialConsoleDeviceType::Tracker);
+    {
+        let mut runtime_guard = state.runtime.lock().map_err(|e| e.to_string())?;
+        *runtime_guard = Some(SerialConsoleRuntime {
+            port_name: port_name.clone(),
+            display_name: selected.display_name.clone(),
+            device_type,
+            tracker_id,
+            write_tx,
+            shutdown_tx,
+            thread_handle,
+            alive,
+        });
+    }
+
+    emit_serial_console_state(&app_handle, &state)?;
+    Ok(selected)
+}
+
+#[tauri::command]
+async fn disconnect_serial_console(
+    app_handle: tauri::AppHandle,
+    state: State<'_, SerialConsoleState>,
+) -> Result<(), String> {
+    close_serial_console_connection(&app_handle, &state).await
+}
+
+#[tauri::command]
+async fn send_serial_console_text(
+    app_handle: tauri::AppHandle,
+    text: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<SerialConsoleState>();
+        let (alive, tx) = {
+            let guard = state.runtime.lock().map_err(|e| e.to_string())?;
+            let runtime = guard
+                .as_ref()
+                .ok_or_else(|| i18n_error("backend_errors.serial_console_not_connected"))?;
+            (runtime.alive.clone(), runtime.write_tx.clone())
+        };
+        if !alive.load(Ordering::Acquire) {
+            return Err(i18n_error("backend_errors.serial_console_not_connected"));
+        }
+        tx.send(text.into_bytes())
+            .map_err(|_| i18n_error("backend_errors.serial_console_not_connected"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1647,6 +2052,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(DockConnectionState::default())
+        .manage(SerialConsoleState::default())
         .manage(FirmwareJobState::default())
         .manage(window_docking::WindowDockingState::default())
         .setup(|app| {
@@ -1682,9 +2088,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             discover_docks,
             list_slime_smol_serial_ports,
+            list_serial_console_ports,
+            get_receiver_serial_status,
             connect_dock,
             disconnect_dock,
+            connect_serial_console,
+            disconnect_serial_console,
             get_connected_port,
+            get_serial_console_state,
             check_dock_connection,
             get_dock_info,
             get_dock_status,
@@ -1697,6 +2108,8 @@ pub fn run() {
             set_dock_led,
             flash_tracker_firmware,
             open_debug_window,
+            open_serial_console_window,
+            send_serial_console_text,
             scan_usb_topology,
             get_app_version,
             dock_with_slimevr,

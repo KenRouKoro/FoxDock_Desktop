@@ -23,6 +23,7 @@ import NotificationManager from "./components/NotificationManager.vue";
 import BaseSpinner from "./components/ui/BaseSpinner.vue";
 import WindowTitleBar from "./components/ui/WindowTitleBar.vue";
 import DebugConsole from "./components/DebugConsole.vue";
+import SerialConsole from "./components/SerialConsole.vue";
 import {
   SYSTEM_SETTINGS_INJECTION_KEY,
   type LanguagePreference,
@@ -30,6 +31,10 @@ import {
 } from "./types/settings";
 import { resolveLocaleFromPreference } from "./utils/locale";
 import type { DockInfo, DockPort, TrackerStatus } from "./types/dock";
+import type {
+  ReceiverStatus,
+  SerialConsoleTargetHint,
+} from "./types/serialConsole";
 import type {
   FirmwareFile,
   FirmwareFlashResult,
@@ -104,6 +109,7 @@ interface Notification {
 // --- 路由与视图控制 ---
 const searchParams = new URLSearchParams(window.location.search);
 const isDebugWindow = ref(searchParams.get("debug") === "true");
+const isSerialConsoleWindow = ref(searchParams.get("serialConsole") === "true");
 const currentView = ref<'home' | 'flashing' | 'settings'>('home');
 
 // --- 状态定义 ---
@@ -113,6 +119,7 @@ const dockInfo = ref<DockInfo | null>(null);
 const trackers = ref<TrackerStatus[]>(
   Array.from({ length: 10 }, (_, index) => ({ id: index + 1, inserted: false })),
 );
+const receiverStatus = ref<ReceiverStatus>({ inserted: false });
 const ledEnabled = ref(false);
 const loading = ref(false);
 const showOverlay = ref(false); // 控制全屏遮罩
@@ -458,8 +465,24 @@ async function refreshTrackerStatus(): Promise<void> {
       autoSleepEnabled.value = result.auto_sleep;
     }
     await scanUsbTopology();
+    await refreshReceiverStatus({ silent: true });
   } catch (error) {
     pushLog(t('notifications.tracker_status_failed', { msg: getErrorMessage(error) }), 'error');
+  }
+}
+
+async function refreshReceiverStatus(
+  options: { silent?: boolean } = {},
+): Promise<void> {
+  try {
+    receiverStatus.value = await invoke<ReceiverStatus>("get_receiver_serial_status");
+  } catch (error) {
+    if (!options.silent) {
+      pushLog(
+        t("notifications.receiver_status_failed", { msg: getErrorMessage(error) }),
+        "error",
+      );
+    }
   }
 }
 
@@ -861,7 +884,22 @@ async function setAutoSleep(enabled: boolean): Promise<void> {
 }
 
 const openDebug = async () => {
-  await invoke("open_debug_window");
+  try {
+    await invoke("open_debug_window");
+  } catch (error) {
+    pushLog(t("notifications.open_debug_failed", { msg: getErrorMessage(error) }), "error");
+  }
+};
+
+const openSerialConsole = async (targetHint: SerialConsoleTargetHint) => {
+  try {
+    await invoke("open_serial_console_window", { targetHint });
+  } catch (error) {
+    pushLog(
+      t("notifications.open_serial_console_failed", { msg: getErrorMessage(error) }),
+      "error",
+    );
+  }
 };
 
 function buildWindowDockingConfig(settings: SystemSettings = systemSettings.value): WindowDockingConfig {
@@ -1047,6 +1085,9 @@ async function installAppUpdate(): Promise<void> {
 
 // --- 生命周期 ---
 onMounted(async () => {
+  if (isSerialConsoleWindow.value) {
+    return;
+  }
   // 须尽早调度：若放在 refreshDocks 等 await 之后，底座扫描慢时用户会感觉「启动从未检测更新」
   if (!isDebugWindow.value && systemSettings.value.autoCheckUpdate && import.meta.env.PROD) {
     window.setTimeout(() => {
@@ -1126,6 +1167,7 @@ onMounted(async () => {
   });
 
   await refreshDocks();
+  await refreshReceiverStatus({ silent: true });
   await loadConnectedPort();
   if (connectedPortName.value) {
     await refreshDockInfo();
@@ -1136,6 +1178,7 @@ onMounted(async () => {
   if (!isDebugWindow.value) {
     connectionMonitorTimer = window.setInterval(() => {
       void checkDockConnectionHealth();
+      void refreshReceiverStatus({ silent: true });
     }, 1500);
     if (systemSettings.value.autoDockOnStartup) {
       window.setTimeout(() => {
@@ -1156,7 +1199,9 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <DebugConsole v-if="isDebugWindow" />
+  <SerialConsole v-if="isSerialConsoleWindow" />
+
+  <DebugConsole v-else-if="isDebugWindow" />
 
   <main v-else class="page">
     <WindowTitleBar
@@ -1189,6 +1234,7 @@ onUnmounted(() => {
         :connected-port-name="connectedPortName"
         :dock-info="dockInfo"
         :trackers="trackers"
+        :receiver-status="receiverStatus"
         :led-enabled="ledEnabled"
         :loading="uiBusy"
         :bl-mode="blMode"
@@ -1204,6 +1250,7 @@ onUnmounted(() => {
         @refresh-status="refreshTrackerStatus"
         @set-bl-mode="setBlMode"
         @set-auto-sleep="setAutoSleep"
+        @open-serial-console="openSerialConsole"
       />
       <TrackerFlashing
         v-else-if="currentView === 'flashing'"
@@ -1261,6 +1308,7 @@ onUnmounted(() => {
         @check-update="checkForAppUpdate"
         @install-update="installAppUpdate"
         @open-debug="openDebug"
+        @open-serial-console="openSerialConsole({ deviceType: 'tracker' })"
         @redock-windows="dockWithSlimeVr({ announce: true })"
       />
     </div>

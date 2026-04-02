@@ -1,0 +1,1205 @@
+<script setup lang="ts">
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import BaseButton from "./ui/BaseButton.vue";
+import BasePanel from "./ui/BasePanel.vue";
+import BaseSelect from "./ui/BaseSelect.vue";
+import type { DockPort } from "../types/dock";
+import type {
+  SerialConsoleDeviceType,
+  SerialConsoleLog,
+  SerialConsoleState,
+  SerialConsoleTargetHint,
+} from "../types/serialConsole";
+import { getSerialConsoleCommands, getReceiverRemoteCommands } from "../utils/serialConsoleCommands";
+
+const { t } = useI18n();
+const LOG_FLUSH_DELAY_MS = 500;
+const MAX_LOG_ENTRIES = 2000;
+
+interface LogDisplaySegment {
+  text: string;
+  classes: string[];
+}
+
+interface ConsoleLogEntry extends SerialConsoleLog {
+  segments: LogDisplaySegment[];
+}
+
+interface PendingConsoleLog {
+  content: string;
+  timestamp: string;
+  timerId: number | null;
+}
+
+interface AnsiStyleState {
+  fg: string | null;
+  bg: string | null;
+  bold: boolean;
+  dim: boolean;
+  italic: boolean;
+  underline: boolean;
+}
+
+const searchParams = new URLSearchParams(window.location.search);
+
+function parseDeviceType(raw: string | null): SerialConsoleDeviceType {
+  return raw === "receiver" ? "receiver" : "tracker";
+}
+
+function parseTrackerId(raw: string | null): number | null {
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function createAnsiStyleState(): AnsiStyleState {
+  return {
+    fg: null,
+    bg: null,
+    bold: false,
+    dim: false,
+    italic: false,
+    underline: false,
+  };
+}
+
+function cloneAnsiClasses(style: AnsiStyleState): string[] {
+  const classes: string[] = [];
+  if (style.bold) classes.push("ansi-bold");
+  if (style.dim) classes.push("ansi-dim");
+  if (style.italic) classes.push("ansi-italic");
+  if (style.underline) classes.push("ansi-underline");
+  if (style.fg) classes.push(`ansi-fg-${style.fg}`);
+  if (style.bg) classes.push(`ansi-bg-${style.bg}`);
+  return classes;
+}
+
+function pushAnsiText(segments: LogDisplaySegment[], text: string, style: AnsiStyleState): void {
+  const cleaned = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+  if (!cleaned) return;
+  segments.push({
+    text: cleaned,
+    classes: cloneAnsiClasses(style),
+  });
+}
+
+function applyAnsiCode(style: AnsiStyleState, code: number): void {
+  const foregroundMap: Record<number, string> = {
+    30: "black",
+    31: "red",
+    32: "green",
+    33: "yellow",
+    34: "blue",
+    35: "magenta",
+    36: "cyan",
+    37: "white",
+    90: "bright-black",
+    91: "bright-red",
+    92: "bright-green",
+    93: "bright-yellow",
+    94: "bright-blue",
+    95: "bright-magenta",
+    96: "bright-cyan",
+    97: "bright-white",
+  };
+  const backgroundMap: Record<number, string> = {
+    40: "black",
+    41: "red",
+    42: "green",
+    43: "yellow",
+    44: "blue",
+    45: "magenta",
+    46: "cyan",
+    47: "white",
+    100: "bright-black",
+    101: "bright-red",
+    102: "bright-green",
+    103: "bright-yellow",
+    104: "bright-blue",
+    105: "bright-magenta",
+    106: "bright-cyan",
+    107: "bright-white",
+  };
+
+  if (code === 0) {
+    style.fg = null;
+    style.bg = null;
+    style.bold = false;
+    style.dim = false;
+    style.italic = false;
+    style.underline = false;
+    return;
+  }
+  if (code === 1) {
+    style.bold = true;
+    return;
+  }
+  if (code === 2) {
+    style.dim = true;
+    return;
+  }
+  if (code === 3) {
+    style.italic = true;
+    return;
+  }
+  if (code === 4) {
+    style.underline = true;
+    return;
+  }
+  if (code === 22) {
+    style.bold = false;
+    style.dim = false;
+    return;
+  }
+  if (code === 23) {
+    style.italic = false;
+    return;
+  }
+  if (code === 24) {
+    style.underline = false;
+    return;
+  }
+  if (code === 39) {
+    style.fg = null;
+    return;
+  }
+  if (code === 49) {
+    style.bg = null;
+    return;
+  }
+  if (foregroundMap[code]) {
+    style.fg = foregroundMap[code];
+    return;
+  }
+  if (backgroundMap[code]) {
+    style.bg = backgroundMap[code];
+  }
+}
+
+function parseAnsiSegments(content: string): LogDisplaySegment[] {
+  const segments: LogDisplaySegment[] = [];
+  const style = createAnsiStyleState();
+  const ansiPattern = /\x1b\[([0-9;]*)([A-Za-z])/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null = ansiPattern.exec(content);
+
+  while (match) {
+    const [token, rawCodes, command] = match;
+    const tokenStart = match.index;
+    if (tokenStart > cursor) {
+      pushAnsiText(segments, content.slice(cursor, tokenStart), style);
+    }
+    if (command === "m") {
+      const codes = rawCodes ? rawCodes.split(";").map((item) => Number(item || "0")) : [0];
+      for (const code of codes) {
+        if (Number.isFinite(code)) {
+          applyAnsiCode(style, code);
+        }
+      }
+    }
+    cursor = tokenStart + token.length;
+    match = ansiPattern.exec(content);
+  }
+
+  if (cursor < content.length) {
+    pushAnsiText(
+      segments,
+      content
+        .slice(cursor)
+        .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+        .replace(/\x1b/g, ""),
+      style,
+    );
+  }
+
+  return segments;
+}
+
+const targetDeviceType = ref<SerialConsoleDeviceType>(
+  parseDeviceType(searchParams.get("deviceType")),
+);
+const targetTrackerId = ref<number | null>(parseTrackerId(searchParams.get("trackerId")));
+const consoleState = ref<SerialConsoleState>({
+  connected: false,
+  deviceType: targetDeviceType.value,
+  trackerId: targetTrackerId.value,
+  portName: null,
+  displayName: null,
+});
+const ports = ref<DockPort[]>([]);
+const selectedPortName = ref("");
+const inputText = ref("");
+const appendNewline = ref(true);
+const logs = ref<ConsoleLogEntry[]>([]);
+const statusText = ref("");
+const logContainer = ref<HTMLElement | null>(null);
+const initError = ref("");
+const pendingLogs = new Map<string, PendingConsoleLog>();
+
+let unlistenLog: (() => void) | null = null;
+let unlistenState: (() => void) | null = null;
+let unlistenTargetHint: (() => void) | null = null;
+
+function resolveBackendMessage(raw: string): string {
+  if (!raw.startsWith("i18n:")) return raw;
+  const payload = raw.slice("i18n:".length);
+  const separatorIndex = payload.indexOf("|");
+  const key = separatorIndex === -1 ? payload : payload.slice(0, separatorIndex);
+  if (!key) return raw;
+  if (separatorIndex === -1) {
+    return t(key);
+  }
+  try {
+    return t(key, JSON.parse(payload.slice(separatorIndex + 1)));
+  } catch {
+    return t(key);
+  }
+}
+
+function setStatus(message: string): void {
+  statusText.value = resolveBackendMessage(message);
+}
+
+function applyState(nextState: SerialConsoleState): void {
+  consoleState.value = nextState;
+  if (nextState.connected) {
+    targetDeviceType.value = nextState.deviceType;
+    targetTrackerId.value = nextState.trackerId ?? null;
+  }
+  if (nextState.portName) {
+    selectedPortName.value = nextState.portName;
+  }
+}
+
+function syncScroll(): void {
+  nextTick(() => {
+    if (logContainer.value) {
+      logContainer.value.scrollTop = logContainer.value.scrollHeight;
+    }
+  });
+}
+
+function clearPendingTimer(pending: PendingConsoleLog): void {
+  if (pending.timerId !== null) {
+    window.clearTimeout(pending.timerId);
+    pending.timerId = null;
+  }
+}
+
+function ensurePendingLog(direction: string): PendingConsoleLog {
+  const existing = pendingLogs.get(direction);
+  if (existing) {
+    return existing;
+  }
+  const created: PendingConsoleLog = {
+    content: "",
+    timestamp: "",
+    timerId: null,
+  };
+  pendingLogs.set(direction, created);
+  return created;
+}
+
+function pushLogEntry(direction: string, content: string, timestamp: string): void {
+  logs.value.push({
+    direction,
+    content,
+    timestamp,
+    segments: parseAnsiSegments(content),
+  });
+  if (logs.value.length > MAX_LOG_ENTRIES) {
+    logs.value.splice(0, logs.value.length - MAX_LOG_ENTRIES);
+  }
+  syncScroll();
+}
+
+function flushPendingLog(direction: string): void {
+  const pending = pendingLogs.get(direction);
+  if (!pending || !pending.content) {
+    return;
+  }
+  const content = pending.content;
+  const timestamp = pending.timestamp;
+  pending.content = "";
+  pending.timestamp = "";
+  clearPendingTimer(pending);
+  pushLogEntry(direction, content, timestamp);
+}
+
+function flushAllPendingLogs(): void {
+  for (const direction of Array.from(pendingLogs.keys())) {
+    flushPendingLog(direction);
+  }
+}
+
+function clearPendingLogs(): void {
+  for (const pending of pendingLogs.values()) {
+    clearPendingTimer(pending);
+  }
+  pendingLogs.clear();
+}
+
+function schedulePendingFlush(direction: string): void {
+  const pending = ensurePendingLog(direction);
+  clearPendingTimer(pending);
+  pending.timerId = window.setTimeout(() => {
+    flushPendingLog(direction);
+  }, LOG_FLUSH_DELAY_MS);
+}
+
+function normalizeLogChunk(content: string): string {
+  return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function handleIncomingLog(payload: SerialConsoleLog): void {
+  const pending = ensurePendingLog(payload.direction);
+  const normalizedChunk = normalizeLogChunk(payload.content);
+  if (!pending.content) {
+    pending.timestamp = payload.timestamp;
+  }
+  pending.content += normalizedChunk;
+
+  let newlineIndex = pending.content.indexOf("\n");
+  while (newlineIndex !== -1) {
+    const completedLine = pending.content.slice(0, newlineIndex);
+    pushLogEntry(payload.direction, completedLine, pending.timestamp || payload.timestamp);
+    pending.content = pending.content.slice(newlineIndex + 1);
+    pending.timestamp = payload.timestamp;
+    newlineIndex = pending.content.indexOf("\n");
+  }
+
+  if (pending.content) {
+    schedulePendingFlush(payload.direction);
+  } else {
+    clearPendingTimer(pending);
+  }
+}
+
+function autoSelectPort(nextPorts: DockPort[]): void {
+  if (
+    consoleState.value.connected &&
+    consoleState.value.portName &&
+    nextPorts.some((port) => port.portName === consoleState.value.portName)
+  ) {
+    selectedPortName.value = consoleState.value.portName;
+    return;
+  }
+  if (
+    selectedPortName.value &&
+    nextPorts.some((port) => port.portName === selectedPortName.value)
+  ) {
+    return;
+  }
+  if (nextPorts.length === 1) {
+    selectedPortName.value = nextPorts[0].portName;
+    return;
+  }
+  selectedPortName.value = "";
+}
+
+async function refreshPorts(): Promise<void> {
+  try {
+    const result = await invoke<DockPort[]>("list_serial_console_ports", {
+      deviceType: targetDeviceType.value,
+    });
+    ports.value = result;
+    autoSelectPort(result);
+    if (!result.length) {
+      setStatus(t("serial_console.status_no_port"));
+    }
+  } catch (error) {
+    const message = typeof error === "string" ? error : t("common.unknown_error");
+    initError.value = resolveBackendMessage(message);
+    setStatus(message);
+  }
+}
+
+async function loadConsoleState(): Promise<void> {
+  try {
+    const result = await invoke<SerialConsoleState>("get_serial_console_state");
+    applyState(result);
+  } catch (error) {
+    const message = typeof error === "string" ? error : t("common.unknown_error");
+    initError.value = resolveBackendMessage(message);
+    setStatus(message);
+  }
+}
+
+async function connectSelectedPort(): Promise<void> {
+  if (!selectedPortName.value) {
+    setStatus(t("serial_console.status_pick_port_first"));
+    return;
+  }
+  try {
+    await invoke("connect_serial_console", {
+      portName: selectedPortName.value,
+      deviceType: targetDeviceType.value,
+    });
+    setStatus(
+      t("serial_console.status_connected", {
+        port: selectedPortName.value,
+      }),
+    );
+    await loadConsoleState();
+    await refreshPorts();
+  } catch (error) {
+    setStatus(typeof error === "string" ? error : t("common.unknown_error"));
+  }
+}
+
+async function disconnectPort(): Promise<void> {
+  try {
+    flushAllPendingLogs();
+    await invoke("disconnect_serial_console");
+    await loadConsoleState();
+    setStatus(t("serial_console.status_disconnected"));
+    await refreshPorts();
+  } catch (error) {
+    setStatus(typeof error === "string" ? error : t("common.unknown_error"));
+  }
+}
+
+async function sendText(commandOverride?: string): Promise<void> {
+  const rawText = commandOverride ?? inputText.value;
+  if (!rawText.trim()) {
+    setStatus(t("serial_console.status_input_empty"));
+    return;
+  }
+  try {
+    await invoke("send_serial_console_text", {
+      text: appendNewline.value ? `${rawText}\n` : rawText,
+    });
+    setStatus(t("serial_console.status_sent"));
+    if (!commandOverride) {
+      inputText.value = "";
+    }
+  } catch (error) {
+    setStatus(typeof error === "string" ? error : t("common.unknown_error"));
+  }
+}
+
+function clearLogs(): void {
+  clearPendingLogs();
+  logs.value = [];
+}
+
+const titleText = computed(() =>
+  targetDeviceType.value === "receiver"
+    ? t("serial_console.device_receiver")
+    : targetTrackerId.value
+      ? t("serial_console.device_tracker_slot", { id: targetTrackerId.value })
+      : t("serial_console.device_tracker"),
+);
+
+const currentConnectionText = computed(() => {
+  if (!consoleState.value.connected) {
+    return t("serial_console.not_connected");
+  }
+  const display = consoleState.value.displayName || consoleState.value.portName || "-";
+  return t("serial_console.connected_to", { port: display });
+});
+
+const quickCommands = computed(() => getSerialConsoleCommands(targetDeviceType.value));
+const remoteCommands = computed(() =>
+  targetDeviceType.value === "receiver" ? getReceiverRemoteCommands() : [],
+);
+
+watch(
+  () => targetDeviceType.value,
+  async (nextDeviceType, previousDeviceType) => {
+    if (nextDeviceType === previousDeviceType) return;
+    if (nextDeviceType === "receiver") {
+      targetTrackerId.value = null;
+    }
+    if (!consoleState.value.connected || consoleState.value.deviceType !== nextDeviceType) {
+      selectedPortName.value = "";
+    }
+    await refreshPorts();
+  },
+);
+
+onMounted(async () => {
+  try {
+    await loadConsoleState();
+    await refreshPorts();
+    if (!consoleState.value.connected) {
+      setStatus(t("serial_console.status_ready"));
+    }
+  } catch (error) {
+    initError.value = resolveBackendMessage(
+      typeof error === "string" ? error : t("common.unknown_error"),
+    );
+  }
+
+  try {
+    unlistenLog = await listen<SerialConsoleLog>("serial-console-log", (event) => {
+      handleIncomingLog(event.payload);
+    });
+  } catch (error) {
+    initError.value = resolveBackendMessage(
+      typeof error === "string" ? error : t("common.unknown_error"),
+    );
+  }
+
+  try {
+    unlistenState = await listen<SerialConsoleState>("serial-console-state", (event) => {
+      const wasConnected = consoleState.value.connected;
+      applyState(event.payload);
+      if (wasConnected && !event.payload.connected) {
+        flushAllPendingLogs();
+        setStatus(t("serial_console.status_disconnected"));
+      }
+    });
+  } catch (error) {
+    initError.value = resolveBackendMessage(
+      typeof error === "string" ? error : t("common.unknown_error"),
+    );
+  }
+
+  try {
+    unlistenTargetHint = await listen<SerialConsoleTargetHint>(
+      "serial-console-target-hint",
+      async (event) => {
+        targetDeviceType.value = event.payload.deviceType;
+        targetTrackerId.value = event.payload.trackerId ?? null;
+        if (!consoleState.value.connected) {
+          selectedPortName.value = "";
+        }
+        await refreshPorts();
+        setStatus(t("serial_console.status_target_updated"));
+      },
+    );
+  } catch (error) {
+    initError.value = resolveBackendMessage(
+      typeof error === "string" ? error : t("common.unknown_error"),
+    );
+  }
+});
+
+onUnmounted(() => {
+  flushAllPendingLogs();
+  clearPendingLogs();
+  if (unlistenLog) unlistenLog();
+  if (unlistenState) unlistenState();
+  if (unlistenTargetHint) unlistenTargetHint();
+  invoke("disconnect_serial_console").catch(() => {});
+});
+</script>
+
+<template>
+  <main class="serial-console-page">
+    <header class="serial-console-header">
+      <div>
+        <h1>{{ t("serial_console.title") }}</h1>
+        <p>{{ titleText }}</p>
+      </div>
+      <div class="serial-console-status">
+        <span class="status-chip" :class="{ 'status-chip--ok': consoleState.connected }">
+          {{ currentConnectionText }}
+        </span>
+      </div>
+    </header>
+
+    <div class="serial-console-layout" :class="{ 'has-remote': remoteCommands.length > 0 }">
+      <BasePanel class="panel-connection" :title="t('serial_console.connection_title')">
+        <p v-if="initError" class="init-error">
+          {{ initError }}
+        </p>
+        <div class="toolbar-row">
+          <BaseSelect v-model="targetDeviceType" class="target-select">
+            <option value="tracker">{{ t("serial_console.target_tracker_label") }}</option>
+            <option value="receiver">{{ t("serial_console.target_receiver_label") }}</option>
+          </BaseSelect>
+          <BaseSelect v-model="selectedPortName" class="port-select">
+            <option value="">{{ t("serial_console.select_port") }}</option>
+            <option v-for="port in ports" :key="port.portName" :value="port.portName">
+              {{ port.displayName }}
+            </option>
+          </BaseSelect>
+          <BaseButton variant="outline" @click="refreshPorts">
+            {{ t("common.refresh") }}
+          </BaseButton>
+          <BaseButton
+            :disabled="!selectedPortName || consoleState.connected"
+            @click="connectSelectedPort"
+          >
+            {{ t("common.connect") }}
+          </BaseButton>
+          <BaseButton
+            :disabled="!consoleState.connected"
+            variant="outline"
+            @click="disconnectPort"
+          >
+            {{ t("common.disconnect") }}
+          </BaseButton>
+        </div>
+        <p class="status-line">{{ statusText }}</p>
+      </BasePanel>
+
+      <BasePanel class="panel-log" :title="t('serial_console.log_title')">
+        <template #header>
+          <div class="panel-head-row">
+            <h2 class="panel-head-title">{{ t("serial_console.log_title") }}</h2>
+            <BaseButton variant="outline" @click="clearLogs">
+              {{ t("common.clear") }}
+            </BaseButton>
+          </div>
+        </template>
+        <div ref="logContainer" class="log-list">
+          <div
+            v-for="(log, index) in logs"
+            :key="`${log.timestamp}-${log.direction}-${index}`"
+            class="log-item"
+            :class="log.direction.toLowerCase()"
+            :title="`[${log.timestamp}] ${log.direction}`"
+          >
+            <span class="log-content"><span v-for="(segment, segmentIndex) in log.segments" :key="segmentIndex" class="log-segment" :class="segment.classes">{{ segment.text }}</span></span>
+          </div>
+          <div v-if="!logs.length" class="log-empty">
+            {{ t("serial_console.log_empty") }}
+          </div>
+        </div>
+      </BasePanel>
+
+      <aside class="panel-sidebar">
+        <BasePanel class="panel-input" :title="t('serial_console.input_title')">
+          <textarea
+            v-model="inputText"
+            class="console-input"
+            :placeholder="t('serial_console.input_placeholder')"
+          />
+          <div class="toolbar-row toolbar-row--between">
+            <label class="toggle-row">
+              <input v-model="appendNewline" type="checkbox" />
+              <span>{{ t("serial_console.append_newline") }}</span>
+            </label>
+            <BaseButton :disabled="!consoleState.connected" @click="() => sendText()">
+              {{ t("serial_console.send") }}
+            </BaseButton>
+          </div>
+        </BasePanel>
+
+        <BasePanel class="panel-commands" :title="t('serial_console.quick_commands_title')">
+          <div class="command-list-scroll">
+            <button
+              v-for="command in quickCommands"
+              :key="command.key"
+              class="command-btn"
+              :disabled="!consoleState.connected"
+              :title="command.command"
+              @click="() => sendText(command.command)"
+            >
+              <span class="command-btn-label">{{ t(`serial_console.commands.${command.key}`) }}</span>
+              <code class="command-btn-code">{{ command.command }}</code>
+            </button>
+          </div>
+        </BasePanel>
+      </aside>
+
+      <aside v-if="remoteCommands.length" class="panel-remote">
+        <BasePanel class="panel-commands" :title="t('serial_console.remote_commands_title')">
+          <div class="command-list-scroll">
+            <button
+              v-for="command in remoteCommands"
+              :key="command.key"
+              class="command-btn"
+              :disabled="!consoleState.connected"
+              :title="command.command"
+              @click="() => sendText(command.command)"
+            >
+              <span class="command-btn-label">{{ t(`serial_console.commands.${command.key}`) }}</span>
+              <code class="command-btn-code">{{ command.command }}</code>
+            </button>
+          </div>
+        </BasePanel>
+      </aside>
+    </div>
+  </main>
+</template>
+
+<style scoped>
+.serial-console-page {
+  height: 100vh;
+  max-height: 100vh;
+  overflow: hidden;
+  background: var(--color-bg-page);
+  color: var(--color-text-main);
+  padding: var(--spacing-md);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+.serial-console-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+
+.serial-console-header h1 {
+  margin: 0 0 var(--spacing-xs);
+  font-size: 22px;
+}
+
+.serial-console-header p {
+  margin: 0;
+  color: var(--color-text-light);
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 var(--spacing-sm);
+  border: var(--border-width) solid var(--color-secondary);
+  background: var(--color-bg-header);
+  color: var(--color-text-light);
+}
+
+.status-chip--ok {
+  border-color: var(--color-success-border);
+  color: var(--color-success-border);
+  background: var(--color-success-bg);
+}
+
+.serial-console-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) 300px;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "connection connection"
+    "log sidebar";
+  gap: var(--spacing-md);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.serial-console-layout.has-remote {
+  grid-template-columns: minmax(300px, 1fr) 280px 280px;
+  grid-template-areas:
+    "connection connection connection"
+    "log sidebar remote";
+}
+
+.panel-connection {
+  grid-area: connection;
+}
+
+.panel-log {
+  grid-area: log;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-sidebar {
+  grid-area: sidebar;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.panel-sidebar > :deep(.base-panel) {
+  margin-bottom: 0;
+}
+
+.panel-remote {
+  grid-area: remote;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-remote > :deep(.base-panel) {
+  margin-bottom: 0;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-input {
+  flex-shrink: 0;
+}
+
+.panel-commands {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-commands :deep(.panel-content) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-log :deep(.panel-content) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-input :deep(.panel-content) {
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.toolbar-row--between {
+  justify-content: space-between;
+}
+
+.port-select {
+  min-width: min(420px, 100%);
+  flex: 1 1 320px;
+}
+
+.target-select {
+  min-width: 180px;
+  flex: 0 0 180px;
+}
+
+.status-line {
+  margin: var(--spacing-sm) 0 0;
+  color: var(--color-text-light);
+}
+
+.init-error {
+  margin: 0 0 var(--spacing-sm);
+  color: var(--color-error);
+  font-weight: 700;
+}
+
+.panel-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.panel-head-title {
+  margin: 0;
+  font-size: 18px;
+  color: var(--color-text-secondary);
+}
+
+.log-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #0d1117;
+  color: #c9d1d9;
+  border: var(--border-width) solid var(--color-secondary);
+  padding: 0;
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.log-item {
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+  border-left: 3px solid transparent;
+}
+
+.log-item.rx {
+  border-left-color: #3fb950;
+}
+
+.log-item.tx {
+  border-left-color: #d29922;
+  background: rgba(210, 153, 34, 0.06);
+}
+
+.log-item.sys {
+  border-left-color: #58a6ff;
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.log-item.tx + .log-item.rx,
+.log-item.sys + .log-item.rx,
+.log-item.rx + .log-item.tx,
+.log-item.rx + .log-item.sys,
+.log-item.tx + .log-item.sys,
+.log-item.sys + .log-item.tx {
+  margin-top: 2px;
+}
+
+.log-content {
+  display: block;
+  flex: 1;
+  min-height: 1.2em;
+  margin: 0;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: inherit;
+  font-family: var(--font-family-mono);
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.log-item.tx .log-content {
+  color: #e3b341;
+}
+
+.log-item.sys .log-content {
+  color: #8b949e;
+  font-style: italic;
+}
+
+.log-segment {
+  color: inherit;
+}
+
+.ansi-bold {
+  font-weight: 700;
+}
+
+.ansi-dim {
+  opacity: 0.7;
+}
+
+.ansi-italic {
+  font-style: italic;
+}
+
+.ansi-underline {
+  text-decoration: underline;
+}
+
+.ansi-fg-black {
+  color: #2f3338;
+}
+
+.ansi-fg-red {
+  color: #ff7b72;
+}
+
+.ansi-fg-green {
+  color: #7ee787;
+}
+
+.ansi-fg-yellow {
+  color: #f2cc60;
+}
+
+.ansi-fg-blue {
+  color: #79c0ff;
+}
+
+.ansi-fg-magenta {
+  color: #d2a8ff;
+}
+
+.ansi-fg-cyan {
+  color: #76e3ea;
+}
+
+.ansi-fg-white {
+  color: #f0f6fc;
+}
+
+.ansi-fg-bright-black {
+  color: #8b949e;
+}
+
+.ansi-fg-bright-red {
+  color: #ffa198;
+}
+
+.ansi-fg-bright-green {
+  color: #56d364;
+}
+
+.ansi-fg-bright-yellow {
+  color: #e3b341;
+}
+
+.ansi-fg-bright-blue {
+  color: #a5d6ff;
+}
+
+.ansi-fg-bright-magenta {
+  color: #e2b8ff;
+}
+
+.ansi-fg-bright-cyan {
+  color: #b3f0ff;
+}
+
+.ansi-fg-bright-white {
+  color: #ffffff;
+}
+
+.ansi-bg-black {
+  background: #2f3338;
+}
+
+.ansi-bg-red {
+  background: rgba(255, 123, 114, 0.2);
+}
+
+.ansi-bg-green {
+  background: rgba(126, 231, 135, 0.2);
+}
+
+.ansi-bg-yellow {
+  background: rgba(242, 204, 96, 0.2);
+}
+
+.ansi-bg-blue {
+  background: rgba(121, 192, 255, 0.2);
+}
+
+.ansi-bg-magenta {
+  background: rgba(210, 168, 255, 0.2);
+}
+
+.ansi-bg-cyan {
+  background: rgba(118, 227, 234, 0.2);
+}
+
+.ansi-bg-white {
+  background: rgba(240, 246, 252, 0.2);
+}
+
+.ansi-bg-bright-black {
+  background: rgba(139, 148, 158, 0.2);
+}
+
+.ansi-bg-bright-red {
+  background: rgba(255, 161, 152, 0.2);
+}
+
+.ansi-bg-bright-green {
+  background: rgba(86, 211, 100, 0.2);
+}
+
+.ansi-bg-bright-yellow {
+  background: rgba(227, 179, 65, 0.2);
+}
+
+.ansi-bg-bright-blue {
+  background: rgba(165, 214, 255, 0.2);
+}
+
+.ansi-bg-bright-magenta {
+  background: rgba(226, 184, 255, 0.2);
+}
+
+.ansi-bg-bright-cyan {
+  background: rgba(179, 240, 255, 0.2);
+}
+
+.ansi-bg-bright-white {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.log-empty {
+  color: #9ba9bb;
+}
+
+.console-input {
+  width: 100%;
+  min-height: 80px;
+  max-height: 160px;
+  padding: var(--spacing-sm);
+  box-sizing: border-box;
+  resize: vertical;
+  border: var(--border-width) solid var(--color-border-control);
+  border-radius: var(--border-radius);
+  font: inherit;
+  font-family: var(--font-family-mono);
+  margin-bottom: var(--spacing-sm);
+}
+
+.console-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  color: var(--color-text-light);
+}
+
+.command-list-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.command-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: 6px var(--spacing-sm);
+  border: var(--border-width) solid var(--color-secondary);
+  background: var(--color-bg-white);
+  color: var(--color-text-main);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.command-btn:hover:not(:disabled) {
+  background: var(--color-bg-header);
+  border-color: var(--color-primary);
+}
+
+.command-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.command-btn-label {
+  font-weight: 600;
+  white-space: normal;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.command-btn-code {
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  color: var(--color-text-light);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+</style>

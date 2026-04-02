@@ -182,9 +182,8 @@ function formatFileSize(bytes: number): string {
           >
             {{ t("tracker_control.refresh_status") }}
           </BaseButton>
-          <button
-            type="button"
-            class="connection-bar__toggle"
+          <BaseButton
+            variant="outline"
             :aria-expanded="isConnectionExpanded"
             aria-controls="flashing-connection-panel"
             @click="toggleConnectionPanel"
@@ -194,7 +193,7 @@ function formatFileSize(bytes: number): string {
                 ? t("home.connection_bar_collapse")
                 : t("home.connection_bar_expand")
             }}
-          </button>
+          </BaseButton>
         </div>
       </div>
 
@@ -465,22 +464,6 @@ function formatFileSize(bytes: number): string {
   padding: 0 var(--spacing-md) var(--spacing-sm);
   font-size: 12px;
   color: var(--color-text-light);
-}
-
-.connection-bar__toggle {
-  margin: 0;
-  padding: var(--spacing-xs) var(--spacing-sm);
-  border: var(--border-width) solid var(--color-secondary);
-  background: var(--color-bg-header);
-  color: var(--color-primary);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.connection-bar__toggle:hover {
-  background: var(--color-secondary-hover);
 }
 
 .connection-bar__panel-outer {
