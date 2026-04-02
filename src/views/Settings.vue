@@ -18,20 +18,30 @@ const props = defineProps<{
   languagePreference: LanguagePreference;
   debugEnabled: boolean;
   autoCheckUpdate: boolean;
+  autoDockOnStartup: boolean;
+  dockAlwaysOnTop: boolean;
+  followSlimeVrWindow: boolean;
+  snapStyleApproximation: boolean;
   updateChecking: boolean;
   updateInstalling: boolean;
   updateAvailable: boolean;
   updateVersion: string | null;
   updateStatusText: string;
+  windowDockingBusy: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "update:languagePreference", value: LanguagePreference): void;
   (e: "update:debugEnabled", value: boolean): void;
   (e: "update:autoCheckUpdate", value: boolean): void;
+  (e: "update:autoDockOnStartup", value: boolean): void;
+  (e: "update:dockAlwaysOnTop", value: boolean): void;
+  (e: "update:followSlimeVrWindow", value: boolean): void;
+  (e: "update:snapStyleApproximation", value: boolean): void;
   (e: "checkUpdate"): void;
   (e: "installUpdate"): void;
   (e: "openDebug"): void;
+  (e: "redockWindows"): void;
 }>();
 
 const appVersionInfo = ref<AppVersionInfo | null>(null);
@@ -56,6 +66,26 @@ function onDebugToggle(event: Event) {
 function onAutoCheckToggle(event: Event) {
   const checked = (event.target as HTMLInputElement).checked;
   emit("update:autoCheckUpdate", checked);
+}
+
+function onAutoDockToggle(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked;
+  emit("update:autoDockOnStartup", checked);
+}
+
+function onDockAlwaysOnTopToggle(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked;
+  emit("update:dockAlwaysOnTop", checked);
+}
+
+function onFollowSlimeVrToggle(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked;
+  emit("update:followSlimeVrWindow", checked);
+}
+
+function onSnapStyleApproximationToggle(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked;
+  emit("update:snapStyleApproximation", checked);
 }
 </script>
 
@@ -93,6 +123,64 @@ function onAutoCheckToggle(event: Event) {
             </label>
             <BaseButton variant="debug" @click="emit('openDebug')">
               {{ t("settings.open_debug_window") }}
+            </BaseButton>
+          </div>
+        </div>
+
+        <div class="setting-row setting-row--wrap">
+          <div class="setting-label-block">
+            <span class="setting-label">{{ t("settings.window_docking_title") }}</span>
+            <p class="setting-hint">{{ t("settings.window_docking_hint") }}</p>
+          </div>
+          <div class="setting-docking-options">
+            <label class="checkbox-row checkbox-row--block">
+              <input
+                type="checkbox"
+                class="checkbox-input"
+                :checked="props.autoDockOnStartup"
+                @change="onAutoDockToggle"
+              />
+              <span>{{ t("settings.window_docking_auto_start") }}</span>
+            </label>
+            <label class="checkbox-row checkbox-row--block">
+              <input
+                type="checkbox"
+                class="checkbox-input"
+                :checked="props.dockAlwaysOnTop"
+                @change="onDockAlwaysOnTopToggle"
+              />
+              <span>{{ t("settings.window_docking_topmost") }}</span>
+            </label>
+            <label class="checkbox-row checkbox-row--block">
+              <input
+                type="checkbox"
+                class="checkbox-input"
+                :checked="props.followSlimeVrWindow"
+                @change="onFollowSlimeVrToggle"
+              />
+              <span>{{ t("settings.window_docking_follow") }}</span>
+            </label>
+            <label class="checkbox-row checkbox-row--block">
+              <input
+                type="checkbox"
+                class="checkbox-input"
+                :checked="props.snapStyleApproximation"
+                @change="onSnapStyleApproximationToggle"
+              />
+              <span>{{ t("settings.window_docking_snap_style") }}</span>
+            </label>
+          </div>
+          <div class="setting-debug-actions">
+            <BaseButton
+              variant="secondary"
+              :disabled="props.windowDockingBusy"
+              @click="emit('redockWindows')"
+            >
+              {{
+                props.windowDockingBusy
+                  ? t("settings.window_docking_busy")
+                  : t("settings.window_docking_redock")
+              }}
             </BaseButton>
           </div>
         </div>
@@ -233,11 +321,20 @@ function onAutoCheckToggle(event: Event) {
   user-select: none;
 }
 
+.checkbox-row--block {
+  width: 100%;
+}
+
 .checkbox-input {
   width: 16px;
   height: 16px;
   accent-color: var(--color-primary);
   cursor: pointer;
+}
+
+.setting-docking-options {
+  display: grid;
+  gap: var(--spacing-sm);
 }
 
 .info-content {

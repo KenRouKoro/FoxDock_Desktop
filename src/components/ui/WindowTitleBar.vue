@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { ref } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+const props = defineProps<{
+  isAlwaysOnTop: boolean;
+  dockingBusy: boolean;
+}>();
+
+const emit = defineEmits<{
+  (e: "toggleAlwaysOnTop"): void;
+  (e: "redockWindows"): void;
+}>();
+
 const appWindow = getCurrentWindow();
-const isAlwaysOnTop = ref(false);
 
 const startDrag = async () => {
   try {
@@ -26,15 +34,6 @@ const close = async () => {
     console.error("[WindowTitleBar] close failed:", error);
   }
 };
-const toggleAlwaysOnTop = async () => {
-  const next = !isAlwaysOnTop.value;
-  try {
-    await appWindow.setAlwaysOnTop(next);
-    isAlwaysOnTop.value = next;
-  } catch (error) {
-    console.error("[WindowTitleBar] setAlwaysOnTop failed:", error);
-  }
-};
 </script>
 
 <template>
@@ -43,16 +42,30 @@ const toggleAlwaysOnTop = async () => {
     <div class="titlebar-actions">
       <div
         class="titlebar-button"
-        :class="{ active: isAlwaysOnTop }"
+        :class="{ active: props.isAlwaysOnTop }"
         @mousedown.stop
-        @click="toggleAlwaysOnTop"
-        :title="isAlwaysOnTop ? '取消置顶' : '窗口置顶'"
+        @click="emit('toggleAlwaysOnTop')"
+        :title="props.isAlwaysOnTop ? '取消置顶' : '窗口置顶'"
       >
-        <svg v-if="isAlwaysOnTop" width="14" height="14"  viewBox="0 0 1024 1024"  fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg v-if="props.isAlwaysOnTop" width="14" height="14"  viewBox="0 0 1024 1024"  fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M110.08 913.984a48 48 0 0 1 0-67.904l270.848-271.04-195.264-195.136a48.256 48.256 0 0 1 0-67.968 371.2 371.2 0 0 1 264.192-109.184 344.384 344.384 0 0 1 78.784 9.472l102.4-102.4a48 48 0 0 1 67.904 0l215.04 215.04a48 48 0 0 1 0 67.84L812.8 493.888a344.64 344.64 0 0 1 10.496 81.92 371.904 371.904 0 0 1-109.376 264 48 48 0 0 1-67.84 0l-197.184-197.12-270.976 270.976a48.064 48.064 0 0 1-67.84 0z m180.288-565.248l386.688 386.624a268.416 268.416 0 0 0 36.224-241.216 47.872 47.872 0 0 1 11.904-48.128l86.912-86.976-147.2-147.2-87.936 87.936a48 48 0 0 1-47.744 12.096 267.2 267.2 0 0 0-79.36-13.312 276.608 276.608 0 0 0-159.488 50.176z" fill="#ffffff" p-id="1713"></path>
         </svg>
         <svg v-else width="14" height="14"  viewBox="0 0 1024 1024"  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M110.08 913.984a48 48 0 0 1 0-67.904l270.848-271.04-195.264-195.136a48.256 48.256 0 0 1 0-67.968 371.2 371.2 0 0 1 264.192-109.184 344.384 344.384 0 0 1 78.784 9.472l102.4-102.4a48 48 0 0 1 67.904 0l215.04 215.04a48 48 0 0 1 0 67.84L812.8 493.888a344.64 344.64 0 0 1 10.496 81.92 371.904 371.904 0 0 1-109.376 264 48 48 0 0 1-67.84 0l-197.184-197.12-270.976 270.976a48.064 48.064 0 0 1-67.84 0z m180.288-565.248l386.688 386.624a268.416 268.416 0 0 0 36.224-241.216 47.872 47.872 0 0 1 11.904-48.128l86.912-86.976-147.2-147.2-87.936 87.936a48 48 0 0 1-47.744 12.096 267.2 267.2 0 0 0-79.36-13.312 276.608 276.608 0 0 0-159.488 50.176z" fill="#ffffff" p-id="1713"></path>
+        </svg>
+      </div>
+      <div
+        class="titlebar-button"
+        :class="{ active: props.dockingBusy }"
+        @mousedown.stop
+        @click="emit('redockWindows')"
+        title="贴靠 SlimeVR"
+      >
+        <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor">
+          <path d="M96 160a64 64 0 0 1 64-64h576a64 64 0 0 1 64 64v128h-64V160H160v576h128v64H160a64 64 0 0 1-64-64V160z"></path>
+          <path d="M384 352a64 64 0 0 1 64-64h416a64 64 0 0 1 64 64v416a64 64 0 0 1-64 64H448a64 64 0 0 1-64-64V352z m64 0v416h416V352H448z"></path>
+          <path d="M288 480h192v64H288v-64z"></path>
+          <path d="M416 416l96 96-96 96-45.248-45.248L389.504 544H224v-64h165.504l-18.752-18.752L416 416z"></path>
         </svg>
       </div>
       <div class="titlebar-button" @mousedown.stop @click="minimize">

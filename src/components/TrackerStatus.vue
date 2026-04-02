@@ -53,6 +53,24 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('click', closeMenu);
 });
+
+/** 与固件 `format_usb_build_info_v1` 一致：`{major}.{minor}.{patch}+{tweak} {hash}`，可选末尾 ` dirty`。哈希放第二行展示。 */
+function parseTrackerVersion(version: string): { mainLine: string; hashLine: string | null } {
+  const dirtySuffix = version.endsWith(" dirty") ? " dirty" : "";
+  const core = dirtySuffix ? version.slice(0, -" dirty".length) : version;
+  const lastSpace = core.lastIndexOf(" ");
+  if (lastSpace === -1) {
+    return { mainLine: version, hashLine: null };
+  }
+  const tail = core.slice(lastSpace + 1);
+  if (/^[0-9a-fA-F]{6,}$/.test(tail)) {
+    return {
+      mainLine: core.slice(0, lastSpace),
+      hashLine: tail + dirtySuffix,
+    };
+  }
+  return { mainLine: version, hashLine: null };
+}
 </script>
 
 <template>
@@ -66,13 +84,22 @@ onUnmounted(() => {
         @contextmenu="showContextMenu($event, item)"
       >
         <div class="tracker-info">
-          <span class="slot-name">{{ t('tracker_status.slot', { id: item.id }) }}</span>
+          <div class="slot-meta-row">
+            <span class="slot-name">{{ t('tracker_status.slot', { id: item.id }) }}</span>
+            <div v-if="item.trackerVersion" class="tracker-version-block">
+              <template v-for="vd in [parseTrackerVersion(item.trackerVersion)]" :key="`${item.id}-vd`">
+                <span class="tracker-version-line">
+                  {{ t('tracker_status.tracker_version_label') }} {{ vd.mainLine }}
+                </span>
+                <span v-if="vd.hashLine" class="tracker-version-hash">{{ vd.hashLine }}</span>
+              </template>
+            </div>
+          </div>
           <span v-if="item.usbPath" class="usb-path">{{ item.usbPath }}</span>
-          <span v-if="item.trackerVersion" class="tracker-version">
-            {{ t('tracker_status.tracker_version_label') }} {{ item.trackerVersion }}
-          </span>
         </div>
-        <span>{{ item.inserted ? t('tracker_status.inserted') : t('tracker_status.not_inserted') }}</span>
+        <span class="tracker-cell-status">{{
+          item.inserted ? t('tracker_status.inserted') : t('tracker_status.not_inserted')
+        }}</span>
       </div>
     </div>
 
@@ -112,18 +139,38 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: var(--spacing-sm);
   cursor: default;
   user-select: none;
+}
+
+.tracker-cell-status {
+  flex-shrink: 0;
+  text-align: right;
 }
 
 .tracker-info {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.slot-meta-row {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--spacing-xs);
+  column-gap: var(--spacing-sm);
+  min-width: 0;
 }
 
 .slot-name {
   font-weight: bold;
+  flex-shrink: 0;
+  line-height: 1.35;
 }
 
 .usb-path {
@@ -132,18 +179,37 @@ onUnmounted(() => {
   font-family: var(--font-family-mono);
 }
 
-.tracker-version {
-  font-size: 10px;
+.tracker-version-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.35;
   color: var(--color-text-light);
   font-family: var(--font-family-mono);
+}
+
+.tracker-version-line {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: inherit;
+}
+
+.tracker-version-hash {
+  display: block;
+  overflow-wrap: anywhere;
   word-break: break-all;
+  line-height: 1.35;
 }
 
 .tracker-cell.inserted .usb-path {
   color: var(--color-success-border);
 }
 
-.tracker-cell.inserted .tracker-version {
+.tracker-cell.inserted .tracker-version-block {
   color: var(--color-text-main);
 }
 

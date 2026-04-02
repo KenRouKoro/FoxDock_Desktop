@@ -12,6 +12,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "vue-i18n";
 
 // 导入组件
@@ -40,6 +41,7 @@ import type {
 } from "./types/firmware";
 
 const { t, locale } = useI18n();
+const appWindow = getCurrentWindow();
 
 /** main.ts 中 provide；若缺失会在运行时报错 */
 const systemSettings = inject(SYSTEM_SETTINGS_INJECTION_KEY) as Ref<SystemSettings>;
@@ -78,6 +80,18 @@ type BlModeResponse = {
 
 type AutoSleepResponse = {
   enabled: boolean;
+};
+
+type DockWindowsResult = {
+  slimevrFound: boolean;
+  slimevrDocked: boolean;
+};
+
+type WindowDockingConfig = {
+  autoDockOnStartup: boolean;
+  dockAlwaysOnTop: boolean;
+  followSlimeVrWindow: boolean;
+  snapStyleApproximation: boolean;
 };
 
 interface Notification {
@@ -119,6 +133,8 @@ const appUpdateStatusText = computed(() =>
 );
 /** Tauri Update 为带私有字段的类实例，勿放入深层响应式 ref，否则 downloadAndInstall 会报私有成员错误 */
 const pendingAppUpdate = shallowRef<Awaited<ReturnType<typeof check>> | null>(null);
+const windowDockingBusy = ref(false);
+const windowAlwaysOnTop = ref(false);
 const firmwareBusy = ref(false);
 const firmwareTrackerId = ref(1);
 const firmwareFile = ref<FirmwareFile | null>(null);
@@ -848,6 +864,65 @@ const openDebug = async () => {
   await invoke("open_debug_window");
 };
 
+function buildWindowDockingConfig(settings: SystemSettings = systemSettings.value): WindowDockingConfig {
+  return {
+    autoDockOnStartup: settings.autoDockOnStartup,
+    dockAlwaysOnTop: settings.dockAlwaysOnTop,
+    followSlimeVrWindow: settings.followSlimeVrWindow,
+    snapStyleApproximation: settings.snapStyleApproximation,
+  };
+}
+
+async function syncWindowDockingConfig(settings: SystemSettings = systemSettings.value): Promise<void> {
+  await invoke("sync_window_docking_config", {
+    config: buildWindowDockingConfig(settings),
+  });
+  await syncWindowAlwaysOnTopState();
+}
+
+async function syncWindowAlwaysOnTopState(): Promise<void> {
+  try {
+    windowAlwaysOnTop.value = await appWindow.isAlwaysOnTop();
+  } catch (error) {
+    console.error("[window] failed to read always-on-top state:", error);
+  }
+}
+
+async function dockWithSlimeVr(options: { announce?: boolean; silentMissing?: boolean } = {}): Promise<void> {
+  if (windowDockingBusy.value) return;
+  windowDockingBusy.value = true;
+  try {
+    const result = await invoke<DockWindowsResult>("dock_with_slimevr");
+    if (!options.announce) {
+      return;
+    }
+    if (result.slimevrFound && result.slimevrDocked) {
+      pushLog(t("notifications.window_docking_success"), "success");
+    } else if (!options.silentMissing) {
+      pushLog(t("notifications.window_docking_partial"), "info");
+    }
+  } catch (error) {
+    if (options.announce) {
+      pushLog(t("notifications.window_docking_failed", { msg: getErrorMessage(error) }), "error");
+    } else {
+      console.error("[window_docking] startup docking failed:", error);
+    }
+  } finally {
+    await syncWindowAlwaysOnTopState();
+    windowDockingBusy.value = false;
+  }
+}
+
+async function toggleWindowAlwaysOnTop(): Promise<void> {
+  const next = !windowAlwaysOnTop.value;
+  try {
+    await appWindow.setAlwaysOnTop(next);
+    windowAlwaysOnTop.value = next;
+  } catch (error) {
+    console.error("[window] setAlwaysOnTop failed:", error);
+  }
+}
+
 async function persistSystemSettings(): Promise<void> {
   try {
     await invoke("save_system_settings", {
@@ -881,6 +956,37 @@ async function setAutoCheckUpdate(enabled: boolean): Promise<void> {
     autoCheckUpdate: enabled,
   };
   await persistSystemSettings();
+}
+
+async function updateWindowDockingSettings(
+  patch: Partial<WindowDockingConfig>,
+): Promise<void> {
+  systemSettings.value = {
+    ...systemSettings.value,
+    ...patch,
+  };
+  await persistSystemSettings();
+  try {
+    await syncWindowDockingConfig();
+  } catch (error) {
+    pushLog(t("notifications.window_docking_config_failed", { msg: getErrorMessage(error) }), "error");
+  }
+}
+
+async function setAutoDockOnStartup(enabled: boolean): Promise<void> {
+  await updateWindowDockingSettings({ autoDockOnStartup: enabled });
+}
+
+async function setDockAlwaysOnTop(enabled: boolean): Promise<void> {
+  await updateWindowDockingSettings({ dockAlwaysOnTop: enabled });
+}
+
+async function setFollowSlimeVrWindow(enabled: boolean): Promise<void> {
+  await updateWindowDockingSettings({ followSlimeVrWindow: enabled });
+}
+
+async function setSnapStyleApproximation(enabled: boolean): Promise<void> {
+  await updateWindowDockingSettings({ snapStyleApproximation: enabled });
 }
 
 async function checkForAppUpdate(options: { silentNoUpdate?: boolean } = {}): Promise<void> {
@@ -941,6 +1047,7 @@ async function installAppUpdate(): Promise<void> {
 
 // --- 生命周期 ---
 onMounted(async () => {
+  await syncWindowAlwaysOnTopState();
   unlistenDock = await listen<any>("dock-event", (event) => {
     if (isDebugWindow.value) return; 
     const data = event.payload;
@@ -1023,6 +1130,11 @@ onMounted(async () => {
     connectionMonitorTimer = window.setInterval(() => {
       void checkDockConnectionHealth();
     }, 1500);
+    if (systemSettings.value.autoDockOnStartup) {
+      window.setTimeout(() => {
+        void dockWithSlimeVr({ announce: false, silentMissing: true });
+      }, 250);
+    }
     if (systemSettings.value.autoCheckUpdate && !import.meta.env.DEV) {
       window.setTimeout(() => {
         void checkForAppUpdate({ silentNoUpdate: true });
@@ -1045,7 +1157,12 @@ onUnmounted(() => {
   <DebugConsole v-if="isDebugWindow" />
 
   <main v-else class="page">
-    <WindowTitleBar />
+    <WindowTitleBar
+      :is-always-on-top="windowAlwaysOnTop"
+      :docking-busy="windowDockingBusy"
+      @toggle-always-on-top="toggleWindowAlwaysOnTop"
+      @redock-windows="dockWithSlimeVr({ announce: true })"
+    />
 
     <!-- 全屏遮罩层 -->
     <Teleport to="body">
@@ -1122,17 +1239,27 @@ onUnmounted(() => {
         :language-preference="systemSettings.languagePreference"
         :debug-enabled="systemSettings.debugEnabled"
         :auto-check-update="systemSettings.autoCheckUpdate"
+        :auto-dock-on-startup="systemSettings.autoDockOnStartup"
+        :dock-always-on-top="systemSettings.dockAlwaysOnTop"
+        :follow-slime-vr-window="systemSettings.followSlimeVrWindow"
+        :snap-style-approximation="systemSettings.snapStyleApproximation"
         :update-checking="appUpdateChecking"
         :update-installing="appUpdateInstalling"
         :update-available="appUpdateAvailable"
         :update-version="appUpdateVersion"
         :update-status-text="appUpdateStatusText"
+        :window-docking-busy="windowDockingBusy"
         @update:language-preference="setLanguagePreference"
         @update:debug-enabled="setDebugEnabled"
         @update:auto-check-update="setAutoCheckUpdate"
+        @update:auto-dock-on-startup="setAutoDockOnStartup"
+        @update:dock-always-on-top="setDockAlwaysOnTop"
+        @update:follow-slime-vr-window="setFollowSlimeVrWindow"
+        @update:snap-style-approximation="setSnapStyleApproximation"
         @check-update="checkForAppUpdate"
         @install-update="installAppUpdate"
         @open-debug="openDebug"
+        @redock-windows="dockWithSlimeVr({ announce: true })"
       />
     </div>
 

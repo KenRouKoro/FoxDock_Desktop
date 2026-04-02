@@ -14,6 +14,14 @@ pub struct SystemSettings {
     pub debug_enabled: bool,
     #[serde(default = "default_auto_check_update")]
     pub auto_check_update: bool,
+    #[serde(default = "default_auto_dock_on_startup")]
+    pub auto_dock_on_startup: bool,
+    #[serde(default)]
+    pub dock_always_on_top: bool,
+    #[serde(default)]
+    pub follow_slime_vr_window: bool,
+    #[serde(default)]
+    pub snap_style_approximation: bool,
 }
 
 impl Default for SystemSettings {
@@ -22,11 +30,19 @@ impl Default for SystemSettings {
             language_preference: LanguagePreference::default(),
             debug_enabled: false,
             auto_check_update: default_auto_check_update(),
+            auto_dock_on_startup: default_auto_dock_on_startup(),
+            dock_always_on_top: false,
+            follow_slime_vr_window: false,
+            snap_style_approximation: false,
         }
     }
 }
 
 fn default_auto_check_update() -> bool {
+    true
+}
+
+fn default_auto_dock_on_startup() -> bool {
     true
 }
 

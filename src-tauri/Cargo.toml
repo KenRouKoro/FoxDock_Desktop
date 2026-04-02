@@ -1,6 +1,6 @@
 [package]
 name = "foxdock-desktop"
-version = "0.0.0-dev.20260402.t005756.51a1b35"
+version = "0.0.0-dev.20260402.t012446.d54254d"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -31,8 +31,14 @@ windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_HumanInterfaceDevice",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
   "Win32_Storage_FileSystem",
+  "Win32_UI_Accessibility",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 nusb = "0.1"
 hidapi = "2.6.5"

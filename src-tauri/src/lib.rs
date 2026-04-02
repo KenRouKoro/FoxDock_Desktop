@@ -1,5 +1,6 @@
 mod system_settings;
 mod usb_build_info;
+mod window_docking;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager, State, WindowEvent};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
@@ -1620,6 +1621,26 @@ fn get_app_version(app_handle: tauri::AppHandle) -> AppVersionInfo {
     }
 }
 
+#[tauri::command]
+fn dock_with_slimevr(
+    app_handle: tauri::AppHandle,
+    docking_state: State<'_, window_docking::WindowDockingState>,
+) -> Result<window_docking::DockWindowsResult, String> {
+    let main_window = app_handle
+        .get_webview_window("main")
+        .ok_or_else(|| i18n_error("backend_errors.main_window_unavailable"))?;
+    window_docking::dock_main_window_with_slimevr(&app_handle, &main_window, docking_state.inner())
+}
+
+#[tauri::command]
+fn sync_window_docking_config(
+    app_handle: tauri::AppHandle,
+    docking_state: State<'_, window_docking::WindowDockingState>,
+    config: window_docking::WindowDockingConfig,
+) -> Result<(), String> {
+    window_docking::sync_runtime_config(&app_handle, docking_state.inner(), config)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1627,6 +1648,37 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(DockConnectionState::default())
         .manage(FirmwareJobState::default())
+        .manage(window_docking::WindowDockingState::default())
+        .setup(|app| {
+            if let Some(main_window) = app.get_webview_window("main") {
+                let docking_state = app.state::<window_docking::WindowDockingState>();
+                let system_settings = system_settings::load_system_settings_disk();
+                let docking_config =
+                    window_docking::WindowDockingConfig::from_system_settings(&system_settings);
+                if let Err(error) = window_docking::initialize_runtime_config(
+                    &main_window,
+                    docking_state.inner(),
+                    docking_config,
+                ) {
+                    eprintln!("[window_docking] runtime init failed: {error}");
+                }
+
+                let tracked_window = main_window.clone();
+                let app_handle = app.handle().clone();
+                main_window.on_window_event(move |event| {
+                    if matches!(event, WindowEvent::Moved(_)) {
+                        let docking_state = app_handle.state::<window_docking::WindowDockingState>();
+                        if let Err(error) = window_docking::handle_main_window_moved(
+                            &tracked_window,
+                            docking_state.inner(),
+                        ) {
+                            eprintln!("[window_docking] move correction failed: {error}");
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             discover_docks,
             list_slime_smol_serial_ports,
@@ -1647,6 +1699,8 @@ pub fn run() {
             open_debug_window,
             scan_usb_topology,
             get_app_version,
+            dock_with_slimevr,
+            sync_window_docking_config,
             system_settings::load_system_settings,
             system_settings::save_system_settings
         ])
