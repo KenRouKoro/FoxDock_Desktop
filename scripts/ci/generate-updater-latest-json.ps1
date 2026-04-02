@@ -78,7 +78,7 @@ $latestJson = @{
   platforms = @{
     "windows-x86_64" = @{
       signature = $signature
-      url = "https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$releaseTag/$assetName"
+      url = "https://foxdock.korostudio.cn/$($env:GITHUB_REPOSITORY)/releases/download/$releaseTag/$assetName"
     }
   }
 }

@@ -1047,6 +1047,13 @@ async function installAppUpdate(): Promise<void> {
 
 // --- 生命周期 ---
 onMounted(async () => {
+  // 须尽早调度：若放在 refreshDocks 等 await 之后，底座扫描慢时用户会感觉「启动从未检测更新」
+  if (!isDebugWindow.value && systemSettings.value.autoCheckUpdate && import.meta.env.PROD) {
+    window.setTimeout(() => {
+      void checkForAppUpdate({ silentNoUpdate: true });
+    }, 1500);
+  }
+
   await syncWindowAlwaysOnTopState();
   unlistenDock = await listen<any>("dock-event", (event) => {
     if (isDebugWindow.value) return; 
@@ -1134,11 +1141,6 @@ onMounted(async () => {
       window.setTimeout(() => {
         void dockWithSlimeVr({ announce: false, silentMissing: true });
       }, 250);
-    }
-    if (systemSettings.value.autoCheckUpdate && !import.meta.env.DEV) {
-      window.setTimeout(() => {
-        void checkForAppUpdate({ silentNoUpdate: true });
-      }, 1200);
     }
   }
 });

@@ -17,7 +17,8 @@ window.addEventListener("contextmenu", (event) => {
 async function bootstrap() {
   let settings: SystemSettings = { ...DEFAULT_SYSTEM_SETTINGS };
   try {
-    settings = await invoke<SystemSettings>("load_system_settings");
+    const loaded = await invoke<SystemSettings>("load_system_settings");
+    settings = { ...DEFAULT_SYSTEM_SETTINGS, ...loaded };
   } catch {
     /* 非 Tauri 环境或命令不可用时使用默认 */
   }
