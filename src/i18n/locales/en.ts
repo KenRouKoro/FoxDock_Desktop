@@ -270,7 +270,7 @@ export default {
     hint_loading: "Please wait for the current operation",
     mode_hint_manual: "Manual: pick a slot and UF2, then start flashing.",
     mode_hint_auto_slot:
-      "Auto: pick target slot and UF2, then enable auto update; flashing starts after a new tracker is inserted in that slot (USB topology required).",
+      "Auto: pick target slot and UF2, then enable auto update; flashing starts after a new tracker is inserted in that slot.",
     mode_hint_batch_all:
       "Batch: flashes inserted slots in order 1→5, skips empty slots, stops on first failure.",
     workflow_title: "Flash Workflow",

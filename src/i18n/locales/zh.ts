@@ -269,7 +269,7 @@ export default {
     file_empty_short: "未选固件",
     hint_loading: "请等待当前操作完成",
     mode_hint_manual: "手动：选择槽位与 UF2 后，点击开始写入。",
-    mode_hint_auto_slot: "自动：选择目标槽位与 UF2 后开启自动更新；该槽位新插入追踪器后将自动刷写（依赖 USB 拓扑）。",
+    mode_hint_auto_slot: "自动：选择目标槽位与 UF2 后开启自动更新；该槽位新插入追踪器后将自动刷写。",
     mode_hint_batch_all: "批量：按 1→5 顺序依次刷写已插入槽位，空槽跳过；任一失败则停止。",
     workflow_title: "刷写流程",
     description: "选择 UF2 固件文件，并为指定追踪器执行固件写入。",
