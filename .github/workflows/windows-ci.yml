@@ -79,6 +79,16 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/run-tauri-windows-build.ps1
 
+      - name: Generate updater latest.json
+        if: github.event_name == 'release'
+        env:
+          FOXDOCK_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RELEASE_BODY: ${{ github.event.release.body }}
+          GITHUB_RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+        shell: pwsh
+        run: ./scripts/ci/generate-updater-latest-json.ps1
+
       - name: Upload workflow artifacts (MSI + NSIS setup)
         uses: actions/upload-artifact@v4
         with:

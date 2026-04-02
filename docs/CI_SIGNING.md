@@ -28,7 +28,7 @@
 ## Updater 签名与 Release 资产
 
 - `TAURI_SIGNING_PRIVATE_KEY` 配置后，Tauri 构建会生成 updater 所需签名文件（`.sig`）与 `latest.json`。
-- Windows CI 现已上传 MSI/NSIS 及其 `.sig`，并尝试上传 `latest.json` 到 workflow artifacts 与 GitHub Release。
+- Windows CI 现已在 release 事件中执行 [`scripts/ci/generate-updater-latest-json.ps1`](../scripts/ci/generate-updater-latest-json.ps1)，根据构建出的 NSIS 或 MSI 资产与其 `.sig` 生成 `latest.json`，并上传到 workflow artifacts 与 GitHub Release。
 - 自动更新依赖 `src-tauri/tauri.conf.json` 中的 `plugins.updater.pubkey` 与 `endpoints`，请确保公钥和 Release 资产匹配。
 
 本地生成 updater 密钥（PowerShell）示例：
