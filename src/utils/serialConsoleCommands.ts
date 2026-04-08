@@ -567,3 +567,19 @@ export function getSerialConsoleCommands(
 export function getReceiverRemoteCommands(): SerialConsoleRemoteCommand[] {
   return receiverRemoteCommands;
 }
+
+function normalizeSentLine(text: string): string {
+  return text.replace(/\r\n/g, "\n").trim();
+}
+
+/**
+ * True if the sent line is DFU / DFU OTA (device typically disconnects and does not return as the same serial).
+ * Local: `dfu`, `dfu ota`; remote: `send <target> dfu`.
+ */
+export function isDfuCommand(text: string): boolean {
+  const line = normalizeSentLine(text);
+  if (!line) return false;
+  const lower = line.toLowerCase();
+  if (lower === "dfu" || lower === "dfu ota") return true;
+  return /^send\s+\S+\s+dfu\s*$/i.test(line);
+}

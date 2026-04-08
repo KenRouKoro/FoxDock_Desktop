@@ -1,3 +1,4 @@
+mod ble_ota;
 mod system_settings;
 mod usb_build_info;
 mod window_docking;
@@ -2088,6 +2089,8 @@ pub fn run() {
         .manage(DockConnectionState::default())
         .manage(SerialConsoleState::default())
         .manage(FirmwareJobState::default())
+        .manage(ble_ota::BleOtaJobState::default())
+        .manage(ble_ota::BleAdapterState::default())
         .manage(window_docking::WindowDockingState::default())
         .setup(|app| {
             if let Some(main_window) = app.get_webview_window("main") {
@@ -2141,6 +2144,11 @@ pub fn run() {
             control_all,
             set_dock_led,
             flash_tracker_firmware,
+            ble_ota::check_bluetooth_available,
+            ble_ota::scan_ble_dfu_devices,
+            ble_ota::validate_ota_package,
+            ble_ota::start_ble_ota,
+            ble_ota::cancel_ble_ota,
             open_debug_window,
             open_serial_console_window,
             send_serial_console_text,

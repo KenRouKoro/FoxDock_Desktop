@@ -57,3 +57,38 @@ export type FirmwareSlotStatus = {
   state: FirmwareRunState;
   message: string;
 };
+
+export type BleOtaPhase =
+  | "idle"
+  | "scanning"
+  | "connecting"
+  | "starting"
+  | "init"
+  | "transferring"
+  | "validating"
+  | "activating"
+  | "success"
+  | "error";
+
+export type BleDfuDevice = {
+  peripheralId: string;
+  name: string;
+  address: string;
+  rssi: number | null;
+};
+
+export type BleOtaPackageInfo = {
+  firmwareType: string;
+  binFileName: string;
+  datFileName: string;
+  binSize: number;
+  datSize: number;
+};
+
+export type BleOtaProgressEvent = {
+  phase: BleOtaPhase | string;
+  progress: number;
+  message: string;
+  bytesTransferred?: number;
+  totalBytes?: number;
+};

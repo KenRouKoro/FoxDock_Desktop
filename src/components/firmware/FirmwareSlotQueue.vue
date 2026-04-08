@@ -26,7 +26,7 @@ const { t } = useI18n();
       </div>
       <div class="slot-card-meta">
         <span>{{ slot.inserted ? t("tracker_status.inserted") : t("tracker_status.not_inserted") }}</span>
-        <span v-if="slot.usbPath" class="mono slot-usb">{{ slot.usbPath }}</span>
+        <span v-if="slot.usbPath" class="slot-usb">{{ slot.usbPath }}</span>
       </div>
       <p class="slot-message">{{ slot.message }}</p>
     </div>
@@ -34,12 +34,6 @@ const { t } = useI18n();
 </template>
 
 <style scoped>
-.mono {
-  font-family: var(--font-family-mono);
-  font-size: 11px;
-  word-break: break-all;
-}
-
 .slot-list {
   display: flex;
   flex-direction: column;
@@ -117,6 +111,9 @@ const { t } = useI18n();
 }
 
 .slot-usb {
+  font-family: var(--font-family-mono);
+  font-size: 11px;
+  word-break: break-all;
   text-align: right;
   max-width: 100%;
   color: var(--color-secondary);

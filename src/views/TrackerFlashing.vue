@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+
+defineOptions({ name: "TrackerFlashing" });
 import { useI18n } from "vue-i18n";
 import ConnectionPanel from "../components/ConnectionPanel.vue";
+import BleOtaPanel from "../components/ble-ota/BleOtaPanel.vue";
 import FirmwareExecutionCard from "../components/firmware/FirmwareExecutionCard.vue";
 import FirmwareSlotQueue from "../components/firmware/FirmwareSlotQueue.vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import BasePanel from "../components/ui/BasePanel.vue";
 import BaseSelect from "../components/ui/BaseSelect.vue";
+import BaseTabs from "../components/ui/BaseTabs.vue";
+import PageHeader from "../components/ui/PageHeader.vue";
 import logoUrl from "../assets/FoxApplication.png";
 import type { DockInfo, DockPort, TrackerStatus } from "../types/dock";
 import type { FirmwareMode, FirmwarePhase, FirmwareSlotStatus } from "../types/firmware";
@@ -48,7 +53,11 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 type FlashingTab = "config" | "status";
+type FirmwareSection = "usb" | "ble_ota";
 
+const FIRMWARE_SECTION_KEY = "foxdock_firmware_section";
+
+const firmwareSection = ref<FirmwareSection>("usb");
 const activeTab = ref<FlashingTab>("config");
 const isConnectionExpanded = ref(true);
 
@@ -76,9 +85,34 @@ function toggleConnectionPanel() {
   isConnectionExpanded.value = !isConnectionExpanded.value;
 }
 
-function setTab(tab: FlashingTab) {
-  activeTab.value = tab;
-}
+watch(firmwareSection, (section) => {
+  try {
+    localStorage.setItem(FIRMWARE_SECTION_KEY, section);
+  } catch {
+    /* ignore */
+  }
+});
+
+const firmwareTopTabs = computed(() => [
+  { key: "usb", label: t("flashing.tab_usb_flash") },
+  { key: "ble_ota", label: t("flashing.tab_ble_ota") },
+]);
+
+const flashingSubTabs = computed(() => [
+  { key: "config", label: t("flashing.tab_config") },
+  { key: "status", label: t("flashing.tab_status") },
+]);
+
+onMounted(() => {
+  try {
+    const saved = localStorage.getItem(FIRMWARE_SECTION_KEY);
+    if (saved === "usb" || saved === "ble_ota") {
+      firmwareSection.value = saved;
+    }
+  } catch {
+    /* ignore */
+  }
+});
 
 const canStartManual = computed(() =>
   Boolean(
@@ -106,6 +140,9 @@ const canStartBatch = computed(() =>
 
 const phaseLabel = computed(() => t(`flashing.phase_${props.phase}`));
 const modeLabel = computed(() => t(`flashing.mode_${props.mode}`));
+const headerDescription = computed(() =>
+  firmwareSection.value === "ble_ota" ? t("flashing.description_ble_ota") : t("flashing.description"),
+);
 const activeSlotLabel = computed(() =>
   props.activeTrackerId > 0 ? t("tracker_status.slot", { id: props.activeTrackerId }) : "-",
 );
@@ -127,6 +164,34 @@ const showPrimaryBlockHint = computed(() => {
   if (props.mode === "auto_slot") return !canToggleAuto.value;
   return !canStartBatch.value;
 });
+
+const canStartFromConfig = computed(() => {
+  if (props.mode === "manual") return canStartManual.value;
+  if (props.mode === "auto_slot") return canToggleAuto.value;
+  return canStartBatch.value;
+});
+
+/** 与 FirmwareExecutionCard 主按钮文案一致 */
+const configStartButtonLabel = computed(() => {
+  if (props.busy) return t("flashing.busy");
+  if (props.mode === "manual") return t("flashing.start");
+  if (props.mode === "auto_slot") {
+    return props.autoUpdateEnabled ? t("flashing.disable_auto") : t("flashing.enable_auto");
+  }
+  return t("flashing.start_batch");
+});
+
+async function startFromConfig(): Promise<void> {
+  activeTab.value = "status";
+  await nextTick();
+  if (props.mode === "manual") {
+    emit("startFlash");
+  } else if (props.mode === "auto_slot") {
+    emit("toggleAutoUpdate");
+  } else {
+    emit("startBatchFlash");
+  }
+}
 function handleFileChange(event: Event): void {
   const target = event.target as HTMLInputElement;
   const file = target.files?.[0] ?? null;
@@ -142,18 +207,24 @@ function formatFileSize(bytes: number): string {
 
 <template>
   <div class="flashing-view">
-    <header class="header">
-      <div class="header-bar">
-        <div class="header-title-area">
-          <img :src="logoUrl" class="logo" alt="FoxDock Logo" />
-          <div class="header-text">
-            <h1>{{ t("flashing.title") }}</h1>
-            <p>{{ t("flashing.description") }}</p>
-          </div>
-        </div>
-      </div>
-    </header>
+    <PageHeader
+      :title="t('flashing.title')"
+      :description="headerDescription"
+      :logo-src="logoUrl"
+      logo-alt="FoxDock Logo"
+    />
 
+    <BaseTabs
+      v-model="firmwareSection"
+      :tabs="firmwareTopTabs"
+      :aria-label="t('flashing.firmware_top_tabs_aria')"
+    />
+
+    <div v-show="firmwareSection === 'ble_ota'" class="ble-ota-wrap">
+      <BleOtaPanel />
+    </div>
+
+    <div v-show="firmwareSection === 'usb'" class="usb-firmware-wrap">
     <section
       class="connection-bar"
       :class="{
@@ -229,28 +300,11 @@ function formatFileSize(bytes: number): string {
       </div>
     </section>
 
-    <nav class="flashing-tabs" role="tablist" :aria-label="t('flashing.tabs_aria_label')">
-      <button
-        type="button"
-        role="tab"
-        class="flashing-tab"
-        :class="{ 'flashing-tab--active': activeTab === 'config' }"
-        :aria-selected="activeTab === 'config'"
-        @click="setTab('config')"
-      >
-        {{ t("flashing.tab_config") }}
-      </button>
-      <button
-        type="button"
-        role="tab"
-        class="flashing-tab"
-        :class="{ 'flashing-tab--active': activeTab === 'status' }"
-        :aria-selected="activeTab === 'status'"
-        @click="setTab('status')"
-      >
-        {{ t("flashing.tab_status") }}
-      </button>
-    </nav>
+    <BaseTabs
+      v-model="activeTab"
+      :tabs="flashingSubTabs"
+      :aria-label="t('flashing.tabs_aria_label')"
+    />
 
     <div v-show="activeTab === 'config'" class="flashing-panels" role="tabpanel">
       <BasePanel :title="t('flashing.config_title')">
@@ -338,6 +392,20 @@ function formatFileSize(bytes: number): string {
             <p v-else class="file-empty">{{ t("flashing.file_empty") }}</p>
           </div>
         </div>
+
+        <div class="config-start-action">
+          <p class="config-start-action__title">{{ t("flashing.start_from_config") }}</p>
+          <p v-if="showPrimaryBlockHint" class="config-start-hint" role="status">
+            {{ primaryBlockHint }}
+          </p>
+          <BaseButton
+            class="config-start-action__btn"
+            :disabled="controlsLocked || !canStartFromConfig"
+            @click="startFromConfig"
+          >
+            {{ configStartButtonLabel }}
+          </BaseButton>
+        </div>
       </BasePanel>
     </div>
 
@@ -364,6 +432,7 @@ function formatFileSize(bytes: number): string {
         <FirmwareSlotQueue :slot-statuses="slotStatuses" :active-tracker-id="activeTrackerId" />
       </BasePanel>
     </div>
+    </div>
   </div>
 </template>
 
@@ -374,192 +443,12 @@ function formatFileSize(bytes: number): string {
   gap: var(--spacing-md);
 }
 
-.header {
-  border: var(--border-width) solid var(--color-secondary);
-  background: var(--color-bg-header);
-  padding: var(--spacing-xs) var(--spacing-md);
-}
-
-.header-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.header-title-area {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-}
-
-.logo {
-  height: 28px;
-  width: auto;
-}
-
-.header-text h1 {
-  margin: 0;
-  font-size: 15px;
-  line-height: 1.2;
-}
-
-.header-text p {
-  margin: 0;
-  font-size: 11px;
-  color: var(--color-text-light);
-}
-
-.connection-bar {
+.ble-ota-wrap,
+.usb-firmware-wrap {
   display: flex;
   flex-direction: column;
-  border: var(--border-width) solid var(--color-secondary);
-  background: var(--color-bg-panel);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.connection-bar--ok {
-  border-color: var(--color-success-border);
-}
-
-.connection-bar__header-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm) var(--spacing-md);
-}
-
-.connection-bar__summary {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-  flex: 1;
-  min-width: 0;
-}
-
-.connection-bar__actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--spacing-sm);
-  flex-shrink: 0;
-}
-
-.connection-bar__hint {
-  margin: 0 var(--spacing-md) var(--spacing-sm);
-  padding: var(--spacing-xs) var(--spacing-sm);
-  font-size: 12px;
-  color: var(--color-error);
-  border: var(--border-width-subtle) solid var(--color-error);
-  background: var(--color-error-bg);
-}
-
-.connection-bar__meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--spacing-sm);
-  padding: 0 var(--spacing-md) var(--spacing-sm);
-  font-size: 12px;
-  color: var(--color-text-light);
-}
-
-.connection-bar__panel-outer {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 0.28s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.connection-bar__panel-outer--open {
-  grid-template-rows: 1fr;
-}
-
-.connection-bar__panel-inner {
-  overflow: hidden;
+  gap: var(--spacing-md);
   min-height: 0;
-}
-
-.connection-bar__panel {
-  border-top: var(--border-width-subtle) solid var(--color-secondary-hover);
-  padding: 0 var(--spacing-md) var(--spacing-sm);
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-
-.connection-bar__panel-outer--open .connection-bar__panel {
-  opacity: 1;
-  transition: opacity 0.22s ease 0.04s;
-}
-
-.summary-line {
-  color: var(--color-text-main);
-}
-
-.summary-line--emphasis {
-  color: var(--color-error);
-  font-weight: 700;
-}
-
-.summary-mode {
-  padding: 2px 6px;
-  border: var(--border-width-subtle) solid var(--color-primary);
-  background: var(--color-bg-white);
-  color: var(--color-primary);
-  font-weight: 600;
-}
-
-.summary-file {
-  flex: 1;
-  min-width: 0;
-  color: var(--color-text-secondary);
-}
-
-.summary-file--empty {
-  color: var(--color-text-light);
-  font-style: italic;
-}
-
-.mono {
-  font-family: var(--font-family-mono);
-  font-size: 12px;
-  word-break: break-all;
-}
-
-.flashing-tabs {
-  display: flex;
-  border: var(--border-width) solid var(--color-secondary);
-  background: var(--color-bg-header);
-}
-
-.flashing-tab {
-  flex: 1;
-  margin: 0;
-  padding: var(--spacing-sm) var(--spacing-xs);
-  border: none;
-  border-right: var(--border-width-subtle) solid var(--color-secondary-hover);
-  background: transparent;
-  color: var(--color-text-light);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.flashing-tab:last-child {
-  border-right: none;
-}
-
-.flashing-tab:hover {
-  background: var(--color-secondary-hover);
-  color: var(--color-primary);
-}
-
-.flashing-tab--active {
-  background: var(--color-bg-white);
-  color: var(--color-primary);
-  box-shadow: inset 0 -3px 0 var(--color-primary);
 }
 
 .flashing-panels {
@@ -664,80 +553,30 @@ function formatFileSize(bytes: number): string {
   color: var(--color-text-secondary);
 }
 
-.file-input {
-  border: var(--border-width) solid var(--color-border-control);
-  border-radius: var(--border-radius);
-  background: var(--color-bg-white);
-  color: var(--color-text-main);
-  font-size: 14px;
-  line-height: 1.25;
-  width: 100%;
-  max-width: 100%;
-  min-height: 32px;
-  padding: 0 var(--spacing-sm) 0 0;
-  cursor: pointer;
-  transition: border-color 0.2s, box-shadow 0.2s;
-  outline: none;
-}
-
-.file-input:focus-visible:not(:disabled) {
-  border-color: var(--color-primary);
-  box-shadow: inset 0 0 0 var(--border-width-subtle) var(--color-primary);
-}
-
-.file-input:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.file-input::file-selector-button {
-  border: none;
-  border-right: var(--border-width) solid var(--color-border-control);
-  background: var(--color-bg-white);
-  color: var(--color-primary);
-  padding: 6px 12px;
-  margin: 0 var(--spacing-sm) 0 0;
-  font-size: 14px;
-  line-height: 1.25;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background-color 0.2s, color 0.2s;
-}
-
-.file-input:hover:not(:disabled)::file-selector-button {
-  background: var(--color-bg-control-hover);
-}
-
-.file-input:disabled::file-selector-button {
-  cursor: not-allowed;
-}
-
-.file-card {
+.config-start-action {
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: var(--border-width) solid var(--color-secondary-hover);
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-xs);
-  padding: var(--spacing-md);
-  border: var(--border-width) dashed var(--color-secondary);
-  background: var(--color-bg-header);
-}
-
-.file-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
   gap: var(--spacing-sm);
-  flex-wrap: wrap;
-  font-size: 12px;
 }
 
-.file-name {
-  text-align: right;
-  max-width: 65%;
-}
-
-.file-empty {
+.config-start-action__title {
   margin: 0;
-  color: var(--color-text-light);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.config-start-hint {
+  margin: 0;
   font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-light);
+}
+
+.config-start-action__btn {
+  align-self: flex-start;
 }
 </style>

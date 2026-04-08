@@ -20,6 +20,7 @@ import {
   getSerialConsoleCommands,
   getReceiverRemoteCommands,
   initParamFormValues,
+  isDfuCommand,
   remoteCommandUsesOnlyAll,
   tryBuildLocalLine,
   tryBuildRemoteTail,
@@ -28,6 +29,8 @@ import {
 const { t } = useI18n();
 const LOG_FLUSH_DELAY_MS = 500;
 const MAX_LOG_ENTRIES = 2000;
+const SERIAL_RECONNECT_INTERVAL_MS = 1500;
+const SERIAL_RECONNECT_MAX_ATTEMPTS = 20;
 
 interface LogDisplaySegment {
   text: string;
@@ -262,6 +265,56 @@ let unlistenLog: (() => void) | null = null;
 let unlistenState: (() => void) | null = null;
 let unlistenTargetHint: (() => void) | null = null;
 
+/** Last payload sent to the device (for DFU vs auto-reconnect). */
+const lastSentCommand = ref<string | null>(null);
+/** User clicked disconnect — do not auto-reconnect. */
+const userInitiatedDisconnect = ref(false);
+const reconnecting = ref(false);
+let reconnectTimerId: ReturnType<typeof setInterval> | null = null;
+let reconnectAttempts = 0;
+let reconnectTargetPort: string | null = null;
+
+function stopReconnect(): void {
+  if (reconnectTimerId !== null) {
+    clearInterval(reconnectTimerId);
+    reconnectTimerId = null;
+  }
+  reconnecting.value = false;
+  reconnectAttempts = 0;
+  reconnectTargetPort = null;
+}
+
+async function reconnectTick(): Promise<void> {
+  const target = reconnectTargetPort;
+  if (!target || !reconnecting.value) return;
+  reconnectAttempts += 1;
+  await refreshPorts();
+  if (ports.value.some((p) => p.portName === target)) {
+    selectedPortName.value = target;
+    await connectSelectedPort();
+    setStatus(t("serial_console.status_reconnect_success", { port: target }));
+    lastSentCommand.value = null;
+    return;
+  }
+  if (reconnectAttempts >= SERIAL_RECONNECT_MAX_ATTEMPTS) {
+    stopReconnect();
+    setStatus(t("serial_console.status_reconnect_failed", { port: target }));
+  }
+}
+
+function startReconnect(portName: string): void {
+  if (!portName || reconnecting.value) return;
+  stopReconnect();
+  reconnecting.value = true;
+  reconnectTargetPort = portName;
+  reconnectAttempts = 0;
+  setStatus(t("serial_console.status_reconnecting", { port: portName }));
+  void reconnectTick();
+  reconnectTimerId = setInterval(() => {
+    void reconnectTick();
+  }, SERIAL_RECONNECT_INTERVAL_MS);
+}
+
 function resolveBackendMessage(raw: string): string {
   if (!raw.startsWith("i18n:")) return raw;
   const payload = raw.slice("i18n:".length);
@@ -448,6 +501,7 @@ async function loadConsoleState(): Promise<void> {
 }
 
 async function connectSelectedPort(): Promise<void> {
+  stopReconnect();
   if (!selectedPortName.value) {
     setStatus(t("serial_console.status_pick_port_first"));
     return;
@@ -470,6 +524,7 @@ async function connectSelectedPort(): Promise<void> {
 }
 
 async function disconnectPort(): Promise<void> {
+  userInitiatedDisconnect.value = true;
   try {
     flushAllPendingLogs();
     await invoke("disconnect_serial_console");
@@ -477,6 +532,7 @@ async function disconnectPort(): Promise<void> {
     setStatus(t("serial_console.status_disconnected"));
     await refreshPorts();
   } catch (error) {
+    userInitiatedDisconnect.value = false;
     setStatus(typeof error === "string" ? error : t("common.unknown_error"));
   }
 }
@@ -487,10 +543,12 @@ async function sendText(commandOverride?: string): Promise<void> {
     setStatus(t("serial_console.status_input_empty"));
     return;
   }
+  const payload = appendNewline.value ? `${rawText}\n` : rawText;
   try {
     await invoke("send_serial_console_text", {
-      text: appendNewline.value ? `${rawText}\n` : rawText,
+      text: payload,
     });
+    lastSentCommand.value = payload;
     setStatus(t("serial_console.status_sent"));
     if (!commandOverride) {
       inputText.value = "";
@@ -706,10 +764,25 @@ onMounted(async () => {
   try {
     unlistenState = await listen<SerialConsoleState>("serial-console-state", (event) => {
       const wasConnected = consoleState.value.connected;
+      const portBefore = consoleState.value.portName;
       applyState(event.payload);
       if (wasConnected && !event.payload.connected) {
         flushAllPendingLogs();
-        setStatus(t("serial_console.status_disconnected"));
+        if (userInitiatedDisconnect.value) {
+          userInitiatedDisconnect.value = false;
+          setStatus(t("serial_console.status_disconnected"));
+          return;
+        }
+        if (isDfuCommand(lastSentCommand.value ?? "")) {
+          lastSentCommand.value = null;
+          setStatus(t("serial_console.status_disconnected"));
+          return;
+        }
+        if (portBefore) {
+          startReconnect(portBefore);
+        } else {
+          setStatus(t("serial_console.status_disconnected"));
+        }
       }
     });
   } catch (error) {
@@ -739,6 +812,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  stopReconnect();
   window.removeEventListener("keydown", onParamModalKeydown);
   flushAllPendingLogs();
   clearPendingLogs();
@@ -764,40 +838,110 @@ onUnmounted(() => {
     </header>
 
     <div class="serial-console-layout" :class="{ 'has-remote': remoteCommands.length > 0 }">
-      <BasePanel class="panel-connection" :title="t('serial_console.connection_title')">
-        <p v-if="initError" class="init-error">
-          {{ initError }}
-        </p>
-        <div class="toolbar-row">
-          <BaseSelect v-model="targetDeviceType" class="target-select">
-            <option value="tracker">{{ t("serial_console.target_tracker_label") }}</option>
-            <option value="receiver">{{ t("serial_console.target_receiver_label") }}</option>
-          </BaseSelect>
-          <BaseSelect v-model="selectedPortName" class="port-select">
-            <option value="">{{ t("serial_console.select_port") }}</option>
-            <option v-for="port in ports" :key="port.portName" :value="port.portName">
-              {{ port.displayName }}
-            </option>
-          </BaseSelect>
-          <BaseButton variant="outline" @click="refreshPorts">
-            {{ t("common.refresh") }}
-          </BaseButton>
-          <BaseButton
-            :disabled="!selectedPortName || consoleState.connected"
-            @click="connectSelectedPort"
-          >
-            {{ t("common.connect") }}
-          </BaseButton>
-          <BaseButton
-            :disabled="!consoleState.connected"
-            variant="outline"
-            @click="disconnectPort"
-          >
-            {{ t("common.disconnect") }}
-          </BaseButton>
-        </div>
-        <p class="status-line">{{ statusText }}</p>
-      </BasePanel>
+      <div class="serial-console-top">
+        <BasePanel class="panel-connection" :title="t('serial_console.connection_title')">
+          <div class="connection-layout">
+            <div
+              class="target-device-tags"
+              role="tablist"
+              :aria-label="t('serial_console.connection_title')"
+            >
+              <button
+                type="button"
+                class="target-tag"
+                role="tab"
+                :aria-selected="targetDeviceType === 'tracker'"
+                :class="{ 'target-tag--active': targetDeviceType === 'tracker' }"
+                @click="targetDeviceType = 'tracker'"
+              >
+                {{ t("serial_console.target_tag_tracker") }}
+              </button>
+              <button
+                type="button"
+                class="target-tag"
+                role="tab"
+                :aria-selected="targetDeviceType === 'receiver'"
+                :class="{ 'target-tag--active': targetDeviceType === 'receiver' }"
+                @click="targetDeviceType = 'receiver'"
+              >
+                {{ t("serial_console.target_tag_receiver") }}
+              </button>
+            </div>
+            <div class="connection-main">
+              <p v-if="initError" class="init-error">
+                {{ initError }}
+              </p>
+              <div class="toolbar-row">
+                <BaseSelect v-model="selectedPortName" class="port-select">
+                  <option value="">{{ t("serial_console.select_port") }}</option>
+                  <option v-for="port in ports" :key="port.portName" :value="port.portName">
+                    {{ port.displayName }}
+                  </option>
+                </BaseSelect>
+                <BaseButton variant="outline" @click="refreshPorts">
+                  {{ t("common.refresh") }}
+                </BaseButton>
+                <BaseButton
+                  :disabled="!selectedPortName || consoleState.connected"
+                  @click="connectSelectedPort"
+                >
+                  {{ t("common.connect") }}
+                </BaseButton>
+                <BaseButton
+                  :disabled="!consoleState.connected"
+                  variant="outline"
+                  @click="disconnectPort"
+                >
+                  {{ t("common.disconnect") }}
+                </BaseButton>
+              </div>
+              <p class="status-line">{{ statusText }}</p>
+            </div>
+          </div>
+        </BasePanel>
+
+        <BasePanel class="panel-quick-actions" :title="t('serial_console.quick_actions_title')">
+          <div class="toolbar-row quick-actions-toolbar" role="group">
+            <BaseButton
+              variant="outline"
+              :disabled="!consoleState.connected"
+              @click="() => sendText('reboot')"
+            >
+              {{ t("serial_console.action_reboot") }}
+            </BaseButton>
+            <BaseButton
+              variant="outline-danger"
+              :disabled="!consoleState.connected"
+              @click="() => sendText('dfu')"
+            >
+              {{ t("serial_console.action_dfu") }}
+            </BaseButton>
+            <BaseButton
+              v-if="targetDeviceType === 'tracker'"
+              variant="outline-danger"
+              :disabled="!consoleState.connected"
+              @click="() => sendText('dfu ota')"
+            >
+              {{ t("serial_console.action_dfu_ota") }}
+            </BaseButton>
+            <BaseButton
+              variant="outline"
+              :disabled="!consoleState.connected"
+              @click="() => sendText('pair')"
+            >
+              {{ t("serial_console.action_pair") }}
+            </BaseButton>
+            <BaseButton
+              v-if="targetDeviceType === 'receiver'"
+              variant="outline"
+              :disabled="!consoleState.connected"
+              @click="() => sendText('exit')"
+            >
+              {{ t("serial_console.action_exit_pairing") }}
+            </BaseButton>
+          </div>
+        </BasePanel>
+      </div>
 
       <BasePanel class="panel-log" :title="t('serial_console.log_title')">
         <template #header>
@@ -842,7 +986,7 @@ onUnmounted(() => {
           </div>
         </BasePanel>
 
-        <BasePanel class="panel-commands" :title="t('serial_console.quick_commands_title')">
+        <BasePanel class="panel-commands" :title="t('serial_console.command_list_title')">
           <div class="command-list-scroll">
             <button
               v-for="command in quickCommands"
@@ -1054,27 +1198,61 @@ onUnmounted(() => {
 }
 
 .serial-console-layout {
+  /* 与侧栏「手动发送 / 指令列表」列宽一致 */
+  --sc-command-column-width: 375px;
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) 300px;
+  grid-template-columns: minmax(300px, 1fr) var(--sc-command-column-width);
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas:
-    "connection connection"
+    "top top"
     "log sidebar";
   gap: var(--spacing-md);
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  align-items: stretch;
 }
 
 .serial-console-layout.has-remote {
-  grid-template-columns: minmax(300px, 1fr) 280px 280px;
+  --sc-command-column-width: 350px;
+  grid-template-columns: minmax(300px, 1fr) var(--sc-command-column-width) var(
+    --sc-command-column-width
+  );
   grid-template-areas:
-    "connection connection connection"
+    "top top top"
     "log sidebar remote";
 }
 
-.panel-connection {
-  grid-area: connection;
+.serial-console-top {
+  grid-area: top;
+  display: grid;
+  /* 第二列与下方指令列表等侧栏同宽 */
+  grid-template-columns: minmax(0, 1fr) var(--sc-command-column-width);
+  gap: var(--spacing-md);
+  align-items: stretch;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .serial-console-top {
+    grid-template-columns: 1fr;
+  }
+}
+
+.panel-connection,
+.panel-quick-actions {
+  min-width: 0;
+}
+
+.panel-quick-actions {
+  width: 100%;
+  min-width: 0;
+}
+
+.panel-connection :deep(.panel-content) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .panel-log {
@@ -1083,6 +1261,8 @@ onUnmounted(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  align-self: stretch;
+  margin-bottom: 0;
 }
 
 .panel-sidebar {
@@ -1092,6 +1272,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
+  align-self: stretch;
+  height: 100%;
 }
 
 .panel-sidebar > :deep(.base-panel) {
@@ -1104,6 +1286,8 @@ onUnmounted(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  align-self: stretch;
+  height: 100%;
 }
 
 .panel-remote > :deep(.base-panel) {
@@ -1157,14 +1341,87 @@ onUnmounted(() => {
   justify-content: space-between;
 }
 
+.quick-actions-toolbar {
+  flex-wrap: wrap;
+}
+
 .port-select {
   min-width: min(420px, 100%);
   flex: 1 1 320px;
 }
 
-.target-select {
-  min-width: 180px;
-  flex: 0 0 180px;
+.connection-layout {
+  display: flex;
+  align-items: stretch;
+  margin: calc(-1 * var(--spacing-md));
+  flex: 1;
+  min-height: 0;
+}
+
+.connection-main {
+  flex: 1;
+  min-width: 0;
+  padding: var(--spacing-md);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.target-device-tags {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding: 0;
+  margin: 0;
+  align-self: stretch;
+  min-width: 7.5rem;
+  background: var(--color-bg-header);
+  border: none;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: var(--border-width-subtle) solid var(--color-secondary);
+  border-right: var(--border-width) solid var(--border-color);
+  box-shadow: inset 4px 0 10px rgba(0, 0, 0, 0.06);
+}
+
+.target-tag {
+  appearance: none;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: var(--spacing-lg) var(--spacing-xl);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text-light);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  box-sizing: border-box;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.target-tag:not(:last-child) {
+  border-bottom: var(--border-width-subtle) solid var(--color-secondary-hover);
+}
+
+.target-tag:hover:not(.target-tag--active) {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--color-text-main);
+}
+
+.target-tag--active {
+  background: var(--color-bg-panel);
+  color: var(--color-primary);
+  font-weight: 700;
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
+.target-tag:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
 }
 
 .status-line {

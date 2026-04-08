@@ -77,8 +77,9 @@ const openConsole = () => {
 
 const singleActions = [
   { label: "actions.ret", value: "ret" },
-  { label: "actions.sleep", value: "sleep" },
   { label: "actions.bl", value: "bl" },
+  { label: "actions.wake_up", value: "wake_up" },
+  { label: "actions.sleep", value: "sleep" },
   { label: "actions.pair", value: "pair" },
 ];
 

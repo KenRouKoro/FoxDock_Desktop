@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 import BaseButton from "../ui/BaseButton.vue";
+import BaseProgressBar from "../ui/BaseProgressBar.vue";
 import type { FirmwareMode } from "../../types/firmware";
 
 defineProps<{
@@ -42,9 +43,7 @@ const { t } = useI18n();
         <strong class="exec-metric-value mono">{{ progress }}%</strong>
       </div>
     </div>
-    <div class="progress-bar-container">
-      <div class="progress-bar" :style="{ width: `${Math.min(progress, 100)}%` }" />
-    </div>
+    <BaseProgressBar :progress="progress" />
     <p class="status-message">{{ statusMessage }}</p>
     <div class="action-row">
       <BaseButton
@@ -69,10 +68,6 @@ const { t } = useI18n();
 </template>
 
 <style scoped>
-.mono {
-  font-family: var(--font-family-mono);
-}
-
 .execution-card {
   border: var(--border-width) solid var(--border-color);
   background: var(--color-bg-white);
@@ -114,19 +109,6 @@ const { t } = useI18n();
 .exec-metric-value {
   font-size: 14px;
   color: var(--color-text-main);
-}
-
-.progress-bar-container {
-  width: 100%;
-  height: 12px;
-  background: var(--color-bg-page);
-  border: var(--border-width) solid var(--color-primary);
-}
-
-.progress-bar {
-  height: 100%;
-  background: var(--color-primary);
-  transition: width 0.2s ease;
 }
 
 .status-message {

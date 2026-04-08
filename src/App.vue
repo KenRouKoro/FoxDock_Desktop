@@ -24,6 +24,7 @@ import BaseSpinner from "./components/ui/BaseSpinner.vue";
 import WindowTitleBar from "./components/ui/WindowTitleBar.vue";
 import DebugConsole from "./components/DebugConsole.vue";
 import SerialConsole from "./components/SerialConsole.vue";
+import { resolveBackendI18nMessage, resolveMessage as resolveBackendMessage } from "./utils/backendI18n";
 import {
   SYSTEM_SETTINGS_INJECTION_KEY,
   type LanguagePreference,
@@ -192,8 +193,6 @@ const ACTION_DELAYS: Record<string, number> = {
 let nextNotifyId = 0;
 let overlayTimer: number | null = null;
 let connectionMonitorTimer: number | null = null;
-const BACKEND_I18N_PREFIX = "i18n:";
-
 function startOverlayTimer(action: string) {
   elapsedTime.value = 0;
   estimatedTime.value = ACTION_DELAYS[action] || 0;
@@ -246,32 +245,6 @@ function resetConnectedState(): void {
   resetFirmwareState({ keepFile: true });
 }
 
-function resolveBackendI18nMessage(raw: string): string | null {
-  if (!raw.startsWith(BACKEND_I18N_PREFIX)) return null;
-  const payload = raw.slice(BACKEND_I18N_PREFIX.length);
-  const separatorIndex = payload.indexOf("|");
-  const key = separatorIndex === -1 ? payload : payload.slice(0, separatorIndex);
-  if (!key) return null;
-  if (separatorIndex === -1) {
-    return t(key);
-  }
-  const paramsText = payload.slice(separatorIndex + 1);
-  try {
-    const parsed = JSON.parse(paramsText) as Record<string, unknown>;
-    const resolvedParams = Object.fromEntries(
-      Object.entries(parsed).map(([paramKey, paramValue]) => {
-        if (typeof paramValue === "string") {
-          return [paramKey, resolveBackendI18nMessage(paramValue) ?? paramValue];
-        }
-        return [paramKey, paramValue];
-      }),
-    );
-    return t(key, resolvedParams);
-  } catch {
-    return t(key);
-  }
-}
-
 // --- 核心业务逻辑 ---
 function getErrorMessage(error: unknown): string {
   const rawMessage = typeof error === "string"
@@ -280,13 +253,13 @@ function getErrorMessage(error: unknown): string {
       ? error.message
       : "";
   if (rawMessage) {
-    return resolveBackendI18nMessage(rawMessage) ?? rawMessage;
+    return resolveBackendI18nMessage(t, rawMessage) ?? rawMessage;
   }
   return t('common.unknown_error');
 }
 
 function resolveMessage(raw: string): string {
-  return resolveBackendI18nMessage(raw) ?? raw;
+  return resolveBackendMessage(t, raw);
 }
 
 function createFirmwareRunItems(): Record<number, FirmwareRunItem> {
@@ -1228,7 +1201,7 @@ onUnmounted(() => {
     </Teleport>
 
     <div class="main-content">
-      <Home 
+      <Home
         v-if="currentView === 'home'"
         :docks="docks"
         :connected-port-name="connectedPortName"
@@ -1252,39 +1225,41 @@ onUnmounted(() => {
         @set-auto-sleep="setAutoSleep"
         @open-serial-console="openSerialConsole"
       />
-      <TrackerFlashing
-        v-else-if="currentView === 'flashing'"
-        :connected-port-name="connectedPortName"
-        :docks="docks"
-        :dock-info="dockInfo"
-        :trackers="trackers"
-        :loading="uiBusy"
-        :busy="firmwareBusy"
-        :mode="firmwareMode"
-        :auto-update-enabled="autoUpdateEnabled"
-        :selected-tracker-id="firmwareTrackerId"
-        :selected-tracker-inserted="selectedFirmwareTracker?.inserted ?? false"
-        :selected-tracker-usb-path="selectedFirmwareTracker?.usbPath ?? ''"
-        :file-name="firmwareFile?.name ?? ''"
-        :file-size="firmwareFile?.size ?? 0"
-        :active-tracker-id="activeFirmwareTrackerId ?? 0"
-        :phase="firmwarePhase"
-        :progress="firmwareProgress"
-        :status-message="firmwareStatusMessage"
-        :slot-statuses="firmwareSlotStatuses"
-        @set-mode="setFirmwareMode"
-        @set-tracker-id="setFirmwareTrackerId"
-        @select-file="selectFirmwareFile"
-        @start-flash="startFirmwareFlash"
-        @toggle-auto-update="toggleAutoUpdate"
-        @start-batch-flash="startBatchFirmwareFlash"
-        @refresh-status="refreshTrackerStatus"
-        @refresh-docks="refreshDocks"
-        @connect-dock="connectDock"
-        @disconnect-dock="disconnectDock"
-      />
+      <KeepAlive>
+        <TrackerFlashing
+          v-if="currentView === 'flashing'"
+          :connected-port-name="connectedPortName"
+          :docks="docks"
+          :dock-info="dockInfo"
+          :trackers="trackers"
+          :loading="uiBusy"
+          :busy="firmwareBusy"
+          :mode="firmwareMode"
+          :auto-update-enabled="autoUpdateEnabled"
+          :selected-tracker-id="firmwareTrackerId"
+          :selected-tracker-inserted="selectedFirmwareTracker?.inserted ?? false"
+          :selected-tracker-usb-path="selectedFirmwareTracker?.usbPath ?? ''"
+          :file-name="firmwareFile?.name ?? ''"
+          :file-size="firmwareFile?.size ?? 0"
+          :active-tracker-id="activeFirmwareTrackerId ?? 0"
+          :phase="firmwarePhase"
+          :progress="firmwareProgress"
+          :status-message="firmwareStatusMessage"
+          :slot-statuses="firmwareSlotStatuses"
+          @set-mode="setFirmwareMode"
+          @set-tracker-id="setFirmwareTrackerId"
+          @select-file="selectFirmwareFile"
+          @start-flash="startFirmwareFlash"
+          @toggle-auto-update="toggleAutoUpdate"
+          @start-batch-flash="startBatchFirmwareFlash"
+          @refresh-status="refreshTrackerStatus"
+          @refresh-docks="refreshDocks"
+          @connect-dock="connectDock"
+          @disconnect-dock="disconnectDock"
+        />
+      </KeepAlive>
       <Settings
-        v-else-if="currentView === 'settings'"
+        v-if="currentView === 'settings'"
         :language-preference="systemSettings.languagePreference"
         :debug-enabled="systemSettings.debugEnabled"
         :auto-check-update="systemSettings.autoCheckUpdate"

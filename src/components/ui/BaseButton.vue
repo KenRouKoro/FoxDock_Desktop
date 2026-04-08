@@ -1,6 +1,6 @@
 <script setup lang="ts">
 interface Props {
-  variant?: 'primary' | 'secondary' | 'outline' | 'debug';
+  variant?: 'primary' | 'secondary' | 'outline' | 'outline-danger' | 'debug';
   disabled?: boolean;
   type?: 'button' | 'submit' | 'reset';
 }
@@ -67,6 +67,17 @@ const emit = defineEmits<{
 
 .variant-outline:hover:not(:disabled) {
   background: var(--color-secondary-hover);
+}
+
+.variant-outline-danger {
+  background: var(--color-bg-white);
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.variant-outline-danger:hover:not(:disabled) {
+  background: var(--color-error-bg);
+  border-color: var(--color-error);
 }
 
 .variant-debug {
