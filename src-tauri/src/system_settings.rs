@@ -1,6 +1,17 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
+
+const I18N_ERROR_PREFIX: &str = "i18n:";
+
+fn i18n_backend_err(key: &str) -> String {
+    format!("{I18N_ERROR_PREFIX}{key}")
+}
+
+fn i18n_backend_err_params(key: &str, params: serde_json::Value) -> String {
+    format!("{I18N_ERROR_PREFIX}{key}|{params}")
+}
 
 /// 与 `tauri.conf.json` 的 `identifier` 对齐，用于应用配置目录名
 const APP_CONFIG_DIR_NAME: &str = "com.foxapplication.foxdock";
@@ -56,9 +67,15 @@ pub enum LanguagePreference {
 }
 
 fn settings_path() -> Result<PathBuf, String> {
-    let base = dirs::config_dir().ok_or_else(|| "config directory not available".to_string())?;
+    let base = dirs::config_dir()
+        .ok_or_else(|| i18n_backend_err("backend_errors.config_directory_unavailable"))?;
     let dir = base.join(APP_CONFIG_DIR_NAME);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| {
+        i18n_backend_err_params(
+            "backend_errors.config_save_failed",
+            json!({ "error": e.to_string() }),
+        )
+    })?;
     Ok(dir.join("system_settings.json"))
 }
 
@@ -82,6 +99,16 @@ pub fn load_system_settings() -> SystemSettings {
 #[tauri::command]
 pub fn save_system_settings(settings: SystemSettings) -> Result<(), String> {
     let path = settings_path()?;
-    let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(path, data).map_err(|e| e.to_string())
+    let data = serde_json::to_string_pretty(&settings).map_err(|e| {
+        i18n_backend_err_params(
+            "backend_errors.config_save_failed",
+            json!({ "error": e.to_string() }),
+        )
+    })?;
+    fs::write(path, data).map_err(|e| {
+        i18n_backend_err_params(
+            "backend_errors.config_save_failed",
+            json!({ "error": e.to_string() }),
+        )
+    })
 }

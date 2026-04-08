@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   isAlwaysOnTop: boolean;
@@ -45,7 +48,7 @@ const close = async () => {
         :class="{ active: props.isAlwaysOnTop }"
         @mousedown.stop
         @click="emit('toggleAlwaysOnTop')"
-        :title="props.isAlwaysOnTop ? '取消置顶' : '窗口置顶'"
+        :title="props.isAlwaysOnTop ? t('app.titlebar_unpin') : t('app.titlebar_pin')"
       >
         <svg v-if="props.isAlwaysOnTop" width="14" height="14"  viewBox="0 0 1024 1024"  fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M110.08 913.984a48 48 0 0 1 0-67.904l270.848-271.04-195.264-195.136a48.256 48.256 0 0 1 0-67.968 371.2 371.2 0 0 1 264.192-109.184 344.384 344.384 0 0 1 78.784 9.472l102.4-102.4a48 48 0 0 1 67.904 0l215.04 215.04a48 48 0 0 1 0 67.84L812.8 493.888a344.64 344.64 0 0 1 10.496 81.92 371.904 371.904 0 0 1-109.376 264 48 48 0 0 1-67.84 0l-197.184-197.12-270.976 270.976a48.064 48.064 0 0 1-67.84 0z m180.288-565.248l386.688 386.624a268.416 268.416 0 0 0 36.224-241.216 47.872 47.872 0 0 1 11.904-48.128l86.912-86.976-147.2-147.2-87.936 87.936a48 48 0 0 1-47.744 12.096 267.2 267.2 0 0 0-79.36-13.312 276.608 276.608 0 0 0-159.488 50.176z" fill="#ffffff" p-id="1713"></path>
@@ -59,7 +62,7 @@ const close = async () => {
         :class="{ active: props.dockingBusy }"
         @mousedown.stop
         @click="emit('redockWindows')"
-        title="贴靠 SlimeVR"
+        :title="t('app.titlebar_redock_slimevr')"
       >
         <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor">
           <path d="M96 160a64 64 0 0 1 64-64h576a64 64 0 0 1 64 64v128h-64V160H160v576h128v64H160a64 64 0 0 1-64-64V160z"></path>

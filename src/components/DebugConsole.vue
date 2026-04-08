@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 interface DebugLog {
   direction: string;
@@ -41,8 +44,8 @@ const clearLogs = () => {
 <template>
   <main class="debug-container">
     <header class="debug-header">
-      <span class="title">Serial Debug Console</span>
-      <button class="clear-btn" @click="clearLogs">Clear Logs</button>
+      <span class="title">{{ t("app.debug_console_title") }}</span>
+      <button class="clear-btn" @click="clearLogs">{{ t("app.debug_console_clear_logs") }}</button>
     </header>
     <div ref="logContainer" class="log-list">
       <div v-for="(log, index) in debugLogs" :key="index" class="log-item" :class="log.direction.toLowerCase()">

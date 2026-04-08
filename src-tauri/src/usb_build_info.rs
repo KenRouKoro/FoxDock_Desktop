@@ -65,7 +65,12 @@ pub fn format_usb_build_info_v1(raw: &[u8]) -> Option<String> {
     let dirty = (flags & 1) != 0;
     let mut s = format!("{major}.{minor}.{patch}+{tweak} {hash}");
     if dirty {
-        s.push_str(" dirty");
+        let suffix = match crate::system_settings::load_system_settings_disk().language_preference {
+            crate::system_settings::LanguagePreference::Zh => " （未提交）",
+            crate::system_settings::LanguagePreference::En
+            | crate::system_settings::LanguagePreference::System => " dirty",
+        };
+        s.push_str(suffix);
     }
     Some(s)
 }

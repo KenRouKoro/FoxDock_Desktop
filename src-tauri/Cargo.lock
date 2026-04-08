@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "foxdock-desktop"
-version = "0.0.0-dev.20260402.t102214.2d5fbb2"
+version = "0.0.0-dev.20260408.t093442.f9fbdf1"
 dependencies = [
  "btleplug",
  "chrono",

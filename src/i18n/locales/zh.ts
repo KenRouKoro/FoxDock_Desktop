@@ -21,7 +21,12 @@ export default {
     info_title: "版本信息",
     app_name: "应用名称",
     app_version: "应用版本",
-    close_btn: "关闭"
+    close_btn: "关闭",
+    titlebar_pin: "窗口置顶",
+    titlebar_unpin: "取消置顶",
+    titlebar_redock_slimevr: "贴靠 SlimeVR",
+    debug_console_title: "串口调试控制台",
+    debug_console_clear_logs: "清除日志"
   },
   home: {
     tab_trackers: "槽位状态",
@@ -542,6 +547,17 @@ export default {
     ble_ota_prn_timeout: "等待 PRN 通知超时，期望设备至少确认 {expected} 字节",
     ble_ota_bin_not_word_aligned: "application bin 长度不是 4 字节对齐（当前 {size} 字节），不符合 Legacy DFU 传输要求",
     ble_ota_disconnected: "连接已断开",
-    ble_ota_cancelled: "升级已取消"
+    ble_ota_cancelled: "升级已取消",
+    serial_write_failed: "串口写入失败：{error}",
+    internal_state_corrupted: "内部状态异常，请重启应用后重试",
+    task_join_failed: "后台任务异常：{detail}",
+    serial_port_enum_failed: "枚举串口失败：{error}",
+    window_create_failed: "创建窗口失败：{detail}",
+    ble_ota_btleplug_error: "蓝牙操作失败：{error}",
+    ble_ota_io_error: "读取文件失败：{error}",
+    ble_ota_unexpected_error: "蓝牙 OTA 异常：{error}",
+    config_directory_unavailable: "无法访问应用配置目录",
+    config_save_failed: "保存设置失败：{error}",
+    serde_parse_failed: "解析设备响应失败：{error}"
   }
 };

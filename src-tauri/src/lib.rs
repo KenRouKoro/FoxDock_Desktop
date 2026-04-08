@@ -285,6 +285,26 @@ fn i18n_error_with_params(key: &str, params: Value) -> String {
     format!("{I18N_ERROR_PREFIX}{key}|{params}")
 }
 
+fn window_title_for_locale(zh: &str, en: &str) -> String {
+    match system_settings::load_system_settings_disk().language_preference {
+        system_settings::LanguagePreference::Zh => zh.to_string(),
+        system_settings::LanguagePreference::En | system_settings::LanguagePreference::System => {
+            en.to_string()
+        }
+    }
+}
+
+fn mutex_lock_failed<T>(_: std::sync::PoisonError<T>) -> String {
+    i18n_error("backend_errors.internal_state_corrupted")
+}
+
+fn spawn_blocking_join_failed(e: impl std::fmt::Debug) -> String {
+    i18n_error_with_params(
+        "backend_errors.task_join_failed",
+        json!({ "detail": format!("{e:?}") }),
+    )
+}
+
 fn emit_firmware_progress(
     app_handle: &tauri::AppHandle,
     tracker_id: u8,
@@ -304,7 +324,12 @@ fn emit_firmware_progress(
 }
 
 fn list_matching_ports() -> Result<Vec<DockPort>, String> {
-    let ports = serialport::available_ports().map_err(|e| e.to_string())?;
+    let ports = serialport::available_ports().map_err(|e| {
+        i18n_error_with_params(
+            "backend_errors.serial_port_enum_failed",
+            json!({ "error": e.to_string() }),
+        )
+    })?;
     let mut result = Vec::new();
 
     for port in ports {
@@ -402,7 +427,12 @@ fn serial_console_device_pid(device_type: SerialConsoleDeviceType) -> u16 {
 fn enumerate_slime_smol_serial_ports_filtered(
     device_type: Option<SerialConsoleDeviceType>,
 ) -> Result<Vec<DockPort>, String> {
-    let ports = serialport::available_ports().map_err(|e| e.to_string())?;
+    let ports = serialport::available_ports().map_err(|e| {
+        i18n_error_with_params(
+            "backend_errors.serial_port_enum_failed",
+            json!({ "error": e.to_string() }),
+        )
+    })?;
     let mut result = Vec::new();
     let win_labels = slime_smol_windows_port_label_map();
 
@@ -487,7 +517,7 @@ async fn send_command_via_channel(
 ) -> Result<Value, String> {
     let _command_guard = state.command_guard.lock().await;
     let tx = {
-        let guard = state.runtime.lock().map_err(|e| e.to_string())?;
+        let guard = state.runtime.lock().map_err(mutex_lock_failed)?;
         guard
             .as_ref()
             .map(|runtime| runtime.command_tx.clone())
@@ -500,7 +530,7 @@ async fn send_command_via_channel(
         response_tx,
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|_| i18n_error("backend_errors.command_interrupted"))?;
 
     match tokio::time::timeout(Duration::from_secs(timeout_secs), response_rx).await {
         Ok(Ok(result)) => result,
@@ -537,7 +567,10 @@ fn spawn_serial_manager(
                 emit_debug_log(&app_handle, "TX", &command_line);
                 
                 if let Err(e) = port.write_all(command_line.as_bytes()) {
-                    let _ = req.response_tx.send(Err(e.to_string()));
+                    let _ = req.response_tx.send(Err(i18n_error_with_params(
+                        "backend_errors.serial_write_failed",
+                        json!({ "error": e.to_string() }),
+                    )));
                     continue;
                 }
                 let _ = port.flush();
@@ -600,7 +633,7 @@ fn spawn_serial_manager(
 fn take_dock_runtime(
     state: &State<'_, DockConnectionState>,
 ) -> Result<Option<DockConnectionRuntime>, String> {
-    let mut guard = state.runtime.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.runtime.lock().map_err(mutex_lock_failed)?;
     Ok(guard.take())
 }
 
@@ -617,7 +650,7 @@ async fn close_dock_connection(state: &State<'_, DockConnectionState>) -> Result
     if let Some(runtime) = take_dock_runtime(state)? {
         tokio::task::spawn_blocking(move || close_dock_runtime(runtime))
             .await
-            .map_err(|e| e.to_string())??;
+            .map_err(spawn_blocking_join_failed)??;
     }
     Ok(())
 }
@@ -625,8 +658,8 @@ async fn close_dock_connection(state: &State<'_, DockConnectionState>) -> Result
 fn build_serial_console_state_payload(
     state: &State<'_, SerialConsoleState>,
 ) -> Result<SerialConsoleStatePayload, String> {
-    let target_hint = state.target_hint.lock().map_err(|e| e.to_string())?.clone();
-    let runtime_guard = state.runtime.lock().map_err(|e| e.to_string())?;
+    let target_hint = state.target_hint.lock().map_err(mutex_lock_failed)?.clone();
+    let runtime_guard = state.runtime.lock().map_err(mutex_lock_failed)?;
     let Some(runtime) = runtime_guard.as_ref() else {
         return Ok(SerialConsoleStatePayload {
             connected: false,
@@ -675,7 +708,7 @@ fn emit_serial_console_log(app_handle: &tauri::AppHandle, direction: &str, conte
 fn take_serial_console_runtime(
     state: &State<'_, SerialConsoleState>,
 ) -> Result<Option<SerialConsoleRuntime>, String> {
-    let mut guard = state.runtime.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.runtime.lock().map_err(mutex_lock_failed)?;
     Ok(guard.take())
 }
 
@@ -697,7 +730,7 @@ async fn close_serial_console_connection(
     if let Some(runtime) = take_serial_console_runtime(state)? {
         tokio::task::spawn_blocking(move || close_serial_console_runtime(runtime))
             .await
-            .map_err(|e| e.to_string())??;
+            .map_err(spawn_blocking_join_failed)??;
     }
     emit_serial_console_state(app_handle, state)?;
     Ok(())
@@ -757,7 +790,12 @@ fn spawn_serial_console_manager(
 
 fn parse_info_response(value: Value) -> Result<DockInfo, String> {
     match value.get("type").and_then(Value::as_str) {
-        Some("info") => serde_json::from_value(value).map_err(|e| e.to_string()),
+        Some("info") => serde_json::from_value(value).map_err(|e| {
+            i18n_error_with_params(
+                "backend_errors.serde_parse_failed",
+                json!({ "error": e.to_string() }),
+            )
+        }),
         _ => Err(i18n_error_with_params(
             "backend_errors.unexpected_response",
             json!({ "expected": "info", "value": value.to_string() }),
@@ -767,7 +805,12 @@ fn parse_info_response(value: Value) -> Result<DockInfo, String> {
 
 fn parse_status_response(value: Value) -> Result<StatusResponse, String> {
     match value.get("type").and_then(Value::as_str) {
-        Some("status") => serde_json::from_value(value).map_err(|e| e.to_string()),
+        Some("status") => serde_json::from_value(value).map_err(|e| {
+            i18n_error_with_params(
+                "backend_errors.serde_parse_failed",
+                json!({ "error": e.to_string() }),
+            )
+        }),
         _ => Err(i18n_error_with_params(
             "backend_errors.unexpected_response",
             json!({ "expected": "status", "value": value.to_string() }),
@@ -777,7 +820,12 @@ fn parse_status_response(value: Value) -> Result<StatusResponse, String> {
 
 fn parse_ack_response(value: Value) -> Result<AckResponse, String> {
     match value.get("type").and_then(Value::as_str) {
-        Some("ack") => serde_json::from_value(value).map_err(|e| e.to_string()),
+        Some("ack") => serde_json::from_value(value).map_err(|e| {
+            i18n_error_with_params(
+                "backend_errors.serde_parse_failed",
+                json!({ "error": e.to_string() }),
+            )
+        }),
         _ => Err(i18n_error_with_params(
             "backend_errors.unexpected_response",
             json!({ "expected": "ack", "value": value.to_string() }),
@@ -787,7 +835,12 @@ fn parse_ack_response(value: Value) -> Result<AckResponse, String> {
 
 fn parse_bl_mode_response(value: Value) -> Result<BlModeResponse, String> {
     match value.get("type").and_then(Value::as_str) {
-        Some("bl_mode") => serde_json::from_value(value).map_err(|e| e.to_string()),
+        Some("bl_mode") => serde_json::from_value(value).map_err(|e| {
+            i18n_error_with_params(
+                "backend_errors.serde_parse_failed",
+                json!({ "error": e.to_string() }),
+            )
+        }),
         _ => Err(i18n_error_with_params(
             "backend_errors.unexpected_response",
             json!({ "expected": "bl_mode", "value": value.to_string() }),
@@ -797,7 +850,12 @@ fn parse_bl_mode_response(value: Value) -> Result<BlModeResponse, String> {
 
 fn parse_auto_sleep_response(value: Value) -> Result<AutoSleepResponse, String> {
     match value.get("type").and_then(Value::as_str) {
-        Some("auto_sleep") => serde_json::from_value(value).map_err(|e| e.to_string()),
+        Some("auto_sleep") => serde_json::from_value(value).map_err(|e| {
+            i18n_error_with_params(
+                "backend_errors.serde_parse_failed",
+                json!({ "error": e.to_string() }),
+            )
+        }),
         _ => Err(i18n_error_with_params(
             "backend_errors.unexpected_response",
             json!({ "expected": "auto_sleep", "value": value.to_string() }),
@@ -1620,7 +1678,7 @@ async fn connect_dock(
 
     // 4. 更新状态
     {
-        let mut runtime_guard = state.runtime.lock().map_err(|e| e.to_string())?;
+        let mut runtime_guard = state.runtime.lock().map_err(mutex_lock_failed)?;
         *runtime_guard = Some(DockConnectionRuntime {
             port_name: port_name.clone(),
             command_tx,
@@ -1668,7 +1726,7 @@ fn get_connected_port(state: State<'_, DockConnectionState>) -> Result<Option<St
     Ok(state
         .runtime
         .lock()
-        .map_err(|e| e.to_string())?
+        .map_err(mutex_lock_failed)?
         .as_ref()
         .map(|runtime| runtime.port_name.clone()))
 }
@@ -1678,7 +1736,7 @@ async fn check_dock_connection(state: State<'_, DockConnectionState>) -> Result<
     let connected = state
         .runtime
         .lock()
-        .map_err(|e| e.to_string())?
+        .map_err(mutex_lock_failed)?
         .as_ref()
         .map(|runtime| runtime.port_name.clone());
     let Some(port_name) = connected else {
@@ -1838,7 +1896,7 @@ async fn open_debug_window(app_handle: tauri::AppHandle) -> Result<(), String> {
         "debug",
         tauri::WebviewUrl::App("/?debug=true".into()),
     )
-    .title("Serial Debug Console")
+    .title(window_title_for_locale("串口调试控制台", "Serial Debug Console"))
     .inner_size(600.0, 400.0)
     .resizable(true)
     .build();
@@ -1851,7 +1909,10 @@ async fn open_debug_window(app_handle: tauri::AppHandle) -> Result<(), String> {
                 let _ = window.set_focus();
                 Ok(())
             } else {
-                Err(e.to_string())
+                Err(i18n_error_with_params(
+                    "backend_errors.window_create_failed",
+                    json!({ "detail": e.to_string() }),
+                ))
             }
         }
     }
@@ -1864,7 +1925,7 @@ async fn open_serial_console_window(
 ) -> Result<(), String> {
     {
         let state = app_handle.state::<SerialConsoleState>();
-        let mut hint_guard = state.target_hint.lock().map_err(|e| e.to_string())?;
+        let mut hint_guard = state.target_hint.lock().map_err(mutex_lock_failed)?;
         *hint_guard = target_hint.clone();
     }
 
@@ -1882,7 +1943,7 @@ async fn open_serial_console_window(
         "serial-console",
         tauri::WebviewUrl::App(url.into()),
     )
-    .title("Serial Console")
+    .title(window_title_for_locale("串口控制台", "Serial Console"))
     .inner_size(1180.0, 720.0)
     .resizable(true)
     .build();
@@ -1925,7 +1986,7 @@ async fn list_serial_console_ports(
         enumerate_slime_smol_serial_ports_filtered(Some(device_type))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(spawn_blocking_join_failed)?
 }
 
 #[tauri::command]
@@ -1942,7 +2003,7 @@ async fn get_receiver_serial_status() -> Result<ReceiverSerialStatus, String> {
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(spawn_blocking_join_failed)?
 }
 
 #[tauri::command]
@@ -1954,7 +2015,7 @@ async fn get_serial_console_state(
         build_serial_console_state_payload(&state)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(spawn_blocking_join_failed)?
 }
 
 #[tauri::command]
@@ -1998,12 +2059,12 @@ async fn connect_serial_console(
     let tracker_id = state
         .target_hint
         .lock()
-        .map_err(|e| e.to_string())?
+        .map_err(mutex_lock_failed)?
         .clone()
         .tracker_id
         .filter(|_| device_type == SerialConsoleDeviceType::Tracker);
     {
-        let mut runtime_guard = state.runtime.lock().map_err(|e| e.to_string())?;
+        let mut runtime_guard = state.runtime.lock().map_err(mutex_lock_failed)?;
         *runtime_guard = Some(SerialConsoleRuntime {
             port_name: port_name.clone(),
             display_name: selected.display_name.clone(),
@@ -2036,7 +2097,7 @@ async fn send_serial_console_text(
     tokio::task::spawn_blocking(move || {
         let state = app_handle.state::<SerialConsoleState>();
         let (alive, tx) = {
-            let guard = state.runtime.lock().map_err(|e| e.to_string())?;
+            let guard = state.runtime.lock().map_err(mutex_lock_failed)?;
             let runtime = guard
                 .as_ref()
                 .ok_or_else(|| i18n_error("backend_errors.serial_console_not_connected"))?;
@@ -2049,7 +2110,7 @@ async fn send_serial_console_text(
             .map_err(|_| i18n_error("backend_errors.serial_console_not_connected"))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(spawn_blocking_join_failed)?
 }
 
 #[tauri::command]

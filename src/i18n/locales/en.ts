@@ -21,7 +21,12 @@ export default {
     info_title: "Version Info",
     app_name: "App Name",
     app_version: "App Version",
-    close_btn: "Close"
+    close_btn: "Close",
+    titlebar_pin: "Pin on top",
+    titlebar_unpin: "Unpin",
+    titlebar_redock_slimevr: "Dock to SlimeVR",
+    debug_console_title: "Serial Debug Console",
+    debug_console_clear_logs: "Clear Logs"
   },
   home: {
     tab_trackers: "Slots",
@@ -548,6 +553,17 @@ export default {
     ble_ota_bin_not_word_aligned:
       "Application bin length is not 4-byte aligned ({size} bytes), which violates Legacy DFU transfer requirements",
     ble_ota_disconnected: "Disconnected",
-    ble_ota_cancelled: "Upgrade cancelled"
+    ble_ota_cancelled: "Upgrade cancelled",
+    serial_write_failed: "Serial write failed: {error}",
+    internal_state_corrupted: "Internal state is corrupted; restart the app and try again",
+    task_join_failed: "Background task error: {detail}",
+    serial_port_enum_failed: "Failed to enumerate serial ports: {error}",
+    window_create_failed: "Failed to create window: {detail}",
+    ble_ota_btleplug_error: "Bluetooth operation failed: {error}",
+    ble_ota_io_error: "Failed to read file: {error}",
+    ble_ota_unexpected_error: "BLE OTA error: {error}",
+    config_directory_unavailable: "Application config directory is not available",
+    config_save_failed: "Failed to save settings: {error}",
+    serde_parse_failed: "Failed to parse device response: {error}"
   }
 };

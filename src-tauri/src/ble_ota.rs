@@ -37,6 +37,27 @@ fn i18n_error_with_params(key: &str, params: serde_json::Value) -> String {
     format!("{I18N_ERROR_PREFIX}{key}|{params}")
 }
 
+fn map_btleplug_err<E: ToString>(e: E) -> String {
+    i18n_error_with_params(
+        "backend_errors.ble_ota_btleplug_error",
+        serde_json::json!({ "error": e.to_string() }),
+    )
+}
+
+fn map_ble_io_err<E: ToString>(e: E) -> String {
+    i18n_error_with_params(
+        "backend_errors.ble_ota_io_error",
+        serde_json::json!({ "error": e.to_string() }),
+    )
+}
+
+fn map_ble_winrt_err<E: ToString>(e: E) -> String {
+    i18n_error_with_params(
+        "backend_errors.ble_ota_unexpected_error",
+        serde_json::json!({ "error": e.to_string() }),
+    )
+}
+
 // Nordic legacy base: 0000xxxx-1212-efde-1523-785feabcd123
 fn nordic_dfu_uuid(short: u16) -> Uuid {
     let s = format!("{:04x}", short);
@@ -158,7 +179,7 @@ async fn get_shared_adapter(
                 serde_json::json!({ "error": e.to_string() }),
             )
         })?;
-    let adapters = manager.adapters().await.map_err(|e| e.to_string())?;
+    let adapters = manager.adapters().await.map_err(map_btleplug_err)?;
     let central = adapters
         .into_iter()
         .next()
@@ -218,7 +239,7 @@ fn parse_ota_zip(zip_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, OtaPackageValida
         let mut f = archive.by_name("manifest.json").map_err(|_| {
             i18n_error("backend_errors.ble_ota_manifest_missing")
         })?;
-        std::io::Read::read_to_string(&mut f, &mut manifest_str).map_err(|e| e.to_string())?;
+        std::io::Read::read_to_string(&mut f, &mut manifest_str).map_err(map_ble_io_err)?;
     }
 
     let manifest: Value = serde_json::from_str(&manifest_str)
@@ -278,7 +299,7 @@ fn read_zip_file(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Re
             serde_json::json!({ "name": name }),
         ))?;
     let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut f, &mut buf).map_err(|e| e.to_string())?;
+    std::io::Read::read_to_end(&mut f, &mut buf).map_err(map_ble_io_err)?;
     Ok(buf)
 }
 
@@ -294,7 +315,7 @@ pub async fn check_bluetooth_available(
                 serde_json::json!({ "error": e.to_string() }),
             )
         })?;
-    let adapters_vec = manager.adapters().await.map_err(|e| e.to_string())?;
+    let adapters_vec = manager.adapters().await.map_err(map_btleplug_err)?;
 
     let mut infos = Vec::new();
     for (idx, a) in adapters_vec.iter().enumerate() {
@@ -325,16 +346,16 @@ pub async fn scan_ble_dfu_devices(
     central
         .start_scan(ScanFilter::default())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(map_btleplug_err)?;
     tokio::time::sleep(Duration::from_secs(5)).await;
-    central.stop_scan().await.map_err(|e| e.to_string())?;
+    central.stop_scan().await.map_err(map_btleplug_err)?;
 
-    let peripherals = central.peripherals().await.map_err(|e| e.to_string())?;
+    let peripherals = central.peripherals().await.map_err(map_btleplug_err)?;
 
     let mut seen: HashMap<String, BleDfuDevice> = HashMap::new();
 
     for p in peripherals {
-        let props_opt = p.properties().await.map_err(|e| e.to_string())?;
+        let props_opt = p.properties().await.map_err(map_btleplug_err)?;
         let Some(props) = props_opt else {
             continue;
         };
@@ -394,7 +415,7 @@ async fn find_peripheral_by_id(
         return Ok(p);
     }
 
-    let list = central.peripherals().await.map_err(|e| e.to_string())?;
+    let list = central.peripherals().await.map_err(map_btleplug_err)?;
     eprintln!(
         "[ble_ota] peripheral() miss; scanning {} cached peripherals",
         list.len()
@@ -414,16 +435,16 @@ async fn find_peripheral_by_id(
     central
         .start_scan(ScanFilter::default())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(map_btleplug_err)?;
     tokio::time::sleep(Duration::from_secs(3)).await;
-    central.stop_scan().await.map_err(|e| e.to_string())?;
+    central.stop_scan().await.map_err(map_btleplug_err)?;
 
     if let Ok(p) = central.peripheral(&id).await {
         eprintln!("[ble_ota] peripheral() hit after rescan");
         return Ok(p);
     }
 
-    let list = central.peripherals().await.map_err(|e| e.to_string())?;
+    let list = central.peripherals().await.map_err(map_btleplug_err)?;
     eprintln!("[ble_ota] after rescan: {} peripherals", list.len());
     for p in list {
         if p.id().to_string() == peripheral_id {
@@ -618,9 +639,9 @@ fn protocol_error_value<T>(
 }
 
 fn writer_buffer(data: &[u8]) -> Result<windows::Storage::Streams::IBuffer, String> {
-    let writer = DataWriter::new().map_err(|e| e.to_string())?;
-    writer.WriteBytes(data).map_err(|e| e.to_string())?;
-    writer.DetachBuffer().map_err(|e| e.to_string())
+    let writer = DataWriter::new().map_err(map_ble_winrt_err)?;
+    writer.WriteBytes(data).map_err(map_ble_winrt_err)?;
+    writer.DetachBuffer().map_err(map_ble_winrt_err)
 }
 
 async fn winrt_write(
@@ -633,12 +654,12 @@ async fn winrt_write(
         let buffer = writer_buffer(data)?;
         characteristic
             .WriteValueWithResultAndOptionAsync(&buffer, write_option)
-            .map_err(|e| e.to_string())?
+            .map_err(map_ble_winrt_err)?
     };
     let result = async_op
         .await
-        .map_err(|e| e.to_string())?;
-    let status = result.Status().map_err(|e| e.to_string())?;
+        .map_err(map_ble_winrt_err)?;
+    let status = result.Status().map_err(map_ble_winrt_err)?;
     if status == GattCommunicationStatus::Success {
         return Ok(());
     }
@@ -654,9 +675,9 @@ async fn winrt_set_notify(characteristic: &GattCharacteristic, enable: bool) -> 
     };
     let status = characteristic
         .WriteClientCharacteristicConfigurationDescriptorAsync(value)
-        .map_err(|e| e.to_string())?
+        .map_err(map_ble_winrt_err)?
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(map_ble_winrt_err)?;
     if status == GattCommunicationStatus::Success {
         return Ok(());
     }
@@ -673,10 +694,10 @@ async fn first_service_by_uuid(
 ) -> Result<GattDeviceService, String> {
     let result = device
         .GetGattServicesForUuidWithCacheModeAsync(uuid_to_guid(uuid), BluetoothCacheMode::Uncached)
-        .map_err(|e| e.to_string())?
+        .map_err(map_ble_winrt_err)?
         .await
-        .map_err(|e| e.to_string())?;
-    let status = result.Status().map_err(|e| e.to_string())?;
+        .map_err(map_ble_winrt_err)?;
+    let status = result.Status().map_err(map_ble_winrt_err)?;
     if status != GattCommunicationStatus::Success {
         return Err(gatt_status_error(
             "get_service",
@@ -684,11 +705,11 @@ async fn first_service_by_uuid(
             protocol_error_value(&result, |r| r.ProtocolError()),
         ));
     }
-    let services = result.Services().map_err(|e| e.to_string())?;
-    if services.Size().map_err(|e| e.to_string())? == 0 {
+    let services = result.Services().map_err(map_ble_winrt_err)?;
+    if services.Size().map_err(map_ble_winrt_err)? == 0 {
         return Err(i18n_error("backend_errors.ble_ota_cp_missing"));
     }
-    services.GetAt(0).map_err(|e| e.to_string())
+    services.GetAt(0).map_err(map_ble_winrt_err)
 }
 
 async fn first_characteristic_by_uuid(
@@ -698,10 +719,10 @@ async fn first_characteristic_by_uuid(
 ) -> Result<GattCharacteristic, String> {
     let result = service
         .GetCharacteristicsForUuidWithCacheModeAsync(uuid_to_guid(uuid), BluetoothCacheMode::Uncached)
-        .map_err(|e| e.to_string())?
+        .map_err(map_ble_winrt_err)?
         .await
-        .map_err(|e| e.to_string())?;
-    let status = result.Status().map_err(|e| e.to_string())?;
+        .map_err(map_ble_winrt_err)?;
+    let status = result.Status().map_err(map_ble_winrt_err)?;
     if status != GattCommunicationStatus::Success {
         return Err(gatt_status_error(
             "get_characteristic",
@@ -709,20 +730,20 @@ async fn first_characteristic_by_uuid(
             protocol_error_value(&result, |r| r.ProtocolError()),
         ));
     }
-    let characteristics = result.Characteristics().map_err(|e| e.to_string())?;
-    if characteristics.Size().map_err(|e| e.to_string())? == 0 {
+    let characteristics = result.Characteristics().map_err(map_ble_winrt_err)?;
+    if characteristics.Size().map_err(map_ble_winrt_err)? == 0 {
         return Err(i18n_error(missing_error_key));
     }
-    characteristics.GetAt(0).map_err(|e| e.to_string())
+    characteristics.GetAt(0).map_err(map_ble_winrt_err)
 }
 
 async fn read_characteristic_uncached(characteristic: &GattCharacteristic) -> Result<Vec<u8>, String> {
     let result = characteristic
         .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)
-        .map_err(|e| e.to_string())?
+        .map_err(map_ble_winrt_err)?
         .await
-        .map_err(|e| e.to_string())?;
-    let status = result.Status().map_err(|e| e.to_string())?;
+        .map_err(map_ble_winrt_err)?;
+    let status = result.Status().map_err(map_ble_winrt_err)?;
     if status != GattCommunicationStatus::Success {
         return Err(gatt_status_error(
             "read_characteristic",
@@ -730,11 +751,11 @@ async fn read_characteristic_uncached(characteristic: &GattCharacteristic) -> Re
             protocol_error_value(&result, |r| r.ProtocolError()),
         ));
     }
-    let value = result.Value().map_err(|e| e.to_string())?;
-    let reader = DataReader::FromBuffer(&value).map_err(|e| e.to_string())?;
-    let len = reader.UnconsumedBufferLength().map_err(|e| e.to_string())? as usize;
+    let value = result.Value().map_err(map_ble_winrt_err)?;
+    let reader = DataReader::FromBuffer(&value).map_err(map_ble_winrt_err)?;
+    let len = reader.UnconsumedBufferLength().map_err(map_ble_winrt_err)? as usize;
     let mut input = vec![0u8; len];
-    reader.ReadBytes(&mut input).map_err(|e| e.to_string())?;
+    reader.ReadBytes(&mut input).map_err(map_ble_winrt_err)?;
     Ok(input)
 }
 
@@ -761,9 +782,9 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
     let address = parse_ble_address_u64(peripheral_id)?;
     let open_start = Instant::now();
     let device = BluetoothLEDevice::FromBluetoothAddressAsync(address)
-        .map_err(|e| e.to_string())?
+        .map_err(map_ble_winrt_err)?
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(map_ble_winrt_err)?;
     eprintln!(
         "[ble_ota][winrt] device opened: address={peripheral_id} elapsed_ms={}",
         open_start.elapsed().as_millis()
@@ -786,9 +807,9 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
         service_start.elapsed().as_millis()
     );
 
-    let session = service.Session().map_err(|e| e.to_string())?;
+    let session = service.Session().map_err(map_ble_winrt_err)?;
     let _ = session.SetMaintainConnection(true);
-    let max_pdu = session.MaxPduSize().map_err(|e| e.to_string())?;
+    let max_pdu = session.MaxPduSize().map_err(map_ble_winrt_err)?;
     eprintln!(
         "[ble_ota][winrt] session info: max_pdu_size={} can_maintain_connection={} maintain_connection={}",
         max_pdu,
@@ -806,9 +827,9 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
 
     if let Ok(ver_result) = service
         .GetCharacteristicsForUuidWithCacheModeAsync(uuid_to_guid(ver_uuid), BluetoothCacheMode::Uncached)
-        .map_err(|e| e.to_string())?
+        .map_err(map_ble_winrt_err)?
         .await
-        .map_err(|e| e.to_string())
+        .map_err(map_ble_winrt_err)
     {
         if ver_result.Status().ok() == Some(GattCommunicationStatus::Success) {
             let ver_char = if let Ok(chars) = ver_result.Characteristics() {
@@ -847,7 +868,7 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
                 Ok(())
             },
         ))
-        .map_err(|e| e.to_string())?;
+        .map_err(map_ble_winrt_err)?;
 
     let notify_start = Instant::now();
     winrt_set_notify(&cp, true).await?;
