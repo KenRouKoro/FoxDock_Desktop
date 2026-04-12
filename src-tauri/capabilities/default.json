@@ -5,7 +5,9 @@
   "windows": [
     "main",
     "debug",
-    "serial-console"
+    "serial-console",
+    "context-menu",
+    "context-submenu"
   ],
   "permissions": [
     "core:default",

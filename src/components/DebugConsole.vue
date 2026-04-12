@@ -14,25 +14,28 @@ interface DebugLog {
 const debugLogs = ref<DebugLog[]>([]);
 const logContainer = ref<HTMLElement | null>(null);
 
+function appendDebugLog(newLog: DebugLog): void {
+  const lastLog = debugLogs.value[debugLogs.value.length - 1];
+  if (lastLog && lastLog.direction === newLog.direction) {
+    lastLog.content += newLog.content;
+    lastLog.timestamp = newLog.timestamp;
+  } else {
+    debugLogs.value.push(newLog);
+  }
+  if (debugLogs.value.length > 2000) debugLogs.value.shift();
+  nextTick(() => {
+    if (logContainer.value) {
+      logContainer.value.scrollTop = logContainer.value.scrollHeight;
+    }
+  });
+}
+
 onMounted(async () => {
   await listen<DebugLog>("serial-debug-log", (event) => {
-    const newLog = event.payload;
-    const lastLog = debugLogs.value[debugLogs.value.length - 1];
-
-    if (lastLog && lastLog.direction === newLog.direction) {
-      lastLog.content += newLog.content;
-      lastLog.timestamp = newLog.timestamp;
-    } else {
-      debugLogs.value.push(newLog);
-    }
-
-    if (debugLogs.value.length > 2000) debugLogs.value.shift();
-    
-    nextTick(() => {
-      if (logContainer.value) {
-        logContainer.value.scrollTop = logContainer.value.scrollHeight;
-      }
-    });
+    appendDebugLog(event.payload);
+  });
+  await listen<DebugLog>("receiver-hid-debug-log", (event) => {
+    appendDebugLog(event.payload);
   });
 });
 
@@ -48,7 +51,12 @@ const clearLogs = () => {
       <button class="clear-btn" @click="clearLogs">{{ t("app.debug_console_clear_logs") }}</button>
     </header>
     <div ref="logContainer" class="log-list">
-      <div v-for="(log, index) in debugLogs" :key="index" class="log-item" :class="log.direction.toLowerCase()">
+      <div
+        v-for="(log, index) in debugLogs"
+        :key="index"
+        class="log-item"
+        :class="log.direction === 'RECV-HID' ? 'recv-hid' : log.direction.toLowerCase()"
+      >
         <span class="ts">[{{ log.timestamp }}]</span>
         <span class="dir">{{ log.direction }}</span>
         <pre class="content">{{ log.content }}</pre>
@@ -123,6 +131,7 @@ const clearLogs = () => {
 .log-item.tx { color: #ce9178 !important; }
 .log-item.rx { color: #b5cea8 !important; }
 .log-item.test { color: #569cd6 !important; }
+.log-item.recv-hid { color: #c586c0 !important; }
 
 .log-item .ts { color: #808080 !important; flex-shrink: 0; }
 .log-item .dir { font-weight: bold; width: 24px; flex-shrink: 0; }

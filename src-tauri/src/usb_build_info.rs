@@ -21,6 +21,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 const TRACKER_VID: u16 = 0x1209;
 const TRACKER_PID: u16 = 0x7692;
+/// Slime Smol Receiver（与 `docs/receiverr/usb-hid-host-integration.zh.md` 一致）。
+const RECEIVER_PID: u16 = 0x7690;
 const BUILD_INFO_REPORT_ID: u8 = 0x01;
 const BUILD_INFO_PAYLOAD_LEN: usize = 24;
 const BUILD_INFO_REPORT_LEN: usize = 1 + BUILD_INFO_PAYLOAD_LEN;
@@ -45,6 +47,33 @@ pub fn read_tracker_usb_build_info_with_log(
     #[cfg(not(windows))]
     {
         let _ = setup_device_id;
+        let _ = log;
+        None
+    }
+}
+
+/// 读取接收器 HID Build Info（与追踪器相同 Feature Report 布局）。
+pub fn read_receiver_usb_build_info_with_log(
+    serial_hint: Option<&str>,
+    mut log: impl FnMut(&str),
+) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let target_key = serial_hint
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_uppercase());
+        read_usb_build_info_for_vid_pid(
+            TRACKER_VID,
+            RECEIVER_PID,
+            "receiver",
+            target_key,
+            &mut log,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = serial_hint;
         let _ = log;
         None
     }
@@ -225,6 +254,27 @@ fn read_tracker_usb_build_info_impl(
         "USB build info(HID): SetupAPI device_id = {}\n",
         setup_device_id
     ));
+    read_usb_build_info_for_vid_pid(
+        TRACKER_VID,
+        TRACKER_PID,
+        "tracker",
+        target_key,
+        log,
+    )
+}
+
+#[cfg(windows)]
+fn read_usb_build_info_for_vid_pid(
+    vid: u16,
+    pid: u16,
+    kind: &str,
+    target_key: Option<String>,
+    log: &mut dyn FnMut(&str),
+) -> Option<String> {
+    log(&format!(
+        "USB build info(HID): kind={kind} target_key={:?}\n",
+        target_key
+    ));
 
     let api = match HidApi::new() {
         Ok(api) => api,
@@ -236,13 +286,13 @@ fn read_tracker_usb_build_info_impl(
 
     let mut candidates: Vec<&DeviceInfo> = api
         .device_list()
-        .filter(|d| d.vendor_id() == TRACKER_VID && d.product_id() == TRACKER_PID)
+        .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
         .collect();
     log(&format!(
         "USB build info(HID): found {} HID device(s) with {:04X}:{:04X}\n",
         candidates.len(),
-        TRACKER_VID,
-        TRACKER_PID
+        vid,
+        pid
     ));
     for (i, d) in candidates.iter().take(12).enumerate() {
         let path = d.path().to_string_lossy();
@@ -269,7 +319,7 @@ fn read_tracker_usb_build_info_impl(
         }
     });
 
-    if let Some(key) = target_key {
+    if let Some(ref key) = target_key {
         let mut serial_matches: Vec<&DeviceInfo> = candidates
             .iter()
             .copied()

@@ -1,6 +1,6 @@
 [package]
 name = "foxdock-desktop"
-version = "0.0.0-dev.20260408.t093442.f9fbdf1"
+version = "0.0.0-dev.20260408.t101509.a5dec2d"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -48,5 +48,6 @@ hidapi = "2.6.5"
 btleplug = "0.11"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 uuid = "1"
+urlencoding = "2"
 futures = "0.3"
 windows = { version = "0.62.2", features = ["Devices_Bluetooth", "Devices_Bluetooth_GenericAttributeProfile", "Foundation", "Storage_Streams"] }

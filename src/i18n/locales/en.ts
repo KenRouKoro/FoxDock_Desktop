@@ -11,7 +11,11 @@ export default {
     info: "Info",
     unknown_error: "Unknown Error",
     processing: "Processing...",
+    loading: "Loading…",
     execution_time: "Elapsed: {elapsed}s / Estimated: {estimated}s"
+  },
+  context_menu: {
+    invalid_state: "Invalid menu state."
   },
   app: {
     title: "FoxDock Console",
@@ -30,7 +34,8 @@ export default {
   },
   home: {
     tab_trackers: "Slots",
-    tab_control: "Control",
+    tab_control: "Dock",
+    tab_receiver_ops: "Receiver",
     connection_bar_label: "Dock connection",
     connection_bar_expand: "Expand connection",
     connection_bar_collapse: "Collapse connection",
@@ -53,10 +58,18 @@ export default {
     title: "Tracker Status",
     slot: "Slot {id}",
     receiver: "Receiver",
+    receiver_panel_title: "Receiver",
+    receiver_commands: "Receiver commands",
+    receiver_menu_general: "General",
+    receiver_menu_rf: "Pairing & RF",
+    receiver_menu_system: "System",
     inserted: "Inserted",
     not_inserted: "Not Inserted",
     tracker_version_label: "Tracker version",
-    open_serial_console: "Open serial console"
+    open_serial_console: "Open serial console",
+    receiver_hid_param_hint:
+      "These commands are sent to the receiver over HID directly; the serial console window is not required.",
+    receiver_hid_send: "Send via HID"
   },
   serial_console: {
     title: "Serial Console",
@@ -461,6 +474,13 @@ export default {
     info_read_failed: "Failed to read dock info: {msg}",
     tracker_status_failed: "Failed to read tracker status: {msg}",
     receiver_status_failed: "Failed to read receiver status: {msg}",
+    receiver_hid_success: "Receiver HID: {line} — {msg}",
+    receiver_hid_failed: "Receiver HID: {line} failed (status {code}) {msg}",
+    receiver_hid_invoke_failed: "Receiver HID failed: {msg}",
+    receiver_hid_truncated: "Receiver HID: {line} — output was truncated by firmware. {msg}",
+    receiver_hid_rssi_summary: "RSSI scan done. Recommended channel {ch} ({dbm} dBm)",
+    receiver_hid_rssi_summary_no_rec: "RSSI scan done. Open the dialog for details.",
+    receiver_hid_list_summary: "Listed {count} stored device(s)",
     bl_mode_read_failed: "Failed to read BL boot mode: {msg}",
     bl_mode_set_success: "BL boot mode set to {mode} ({name})",
     bl_mode_set_failed: "Failed to set BL boot mode: {msg}",
@@ -482,6 +502,22 @@ export default {
     event_inserted: "[Event] Slot #{id} Inserted",
     event_removed: "[Event] Slot #{id} Removed",
     event_boot: "[Event] Dock rebooted: {project} v{version}"
+  },
+  receiver_hid_rich: {
+    modal_title_rssi: "RSSI scan result",
+    modal_title_list: "Stored devices",
+    modal_close: "Close",
+    truncated_warning: "Output may be truncated by firmware; results below may be incomplete.",
+    rssi_current_channel: "Current channel",
+    rssi_recommended: "Recommended",
+    rssi_recommended_value: "Channel {ch} ({dbm} dBm)",
+    rssi_legend: "Lower dBm values (more negative) usually mean less interference.",
+    rssi_col_channel: "Channel",
+    rssi_col_dbm: "RSSI (dBm)",
+    copy_raw: "Copy raw text",
+    copy_one: "Copy this MAC",
+    copy_one_short: "Copy",
+    list_count: "{count} device(s)"
   },
   backend_errors: {
     dock_not_connected: "Dock is not connected",
@@ -558,6 +594,17 @@ export default {
     internal_state_corrupted: "Internal state is corrupted; restart the app and try again",
     task_join_failed: "Background task error: {detail}",
     serial_port_enum_failed: "Failed to enumerate serial ports: {error}",
+    receiver_hid_empty_line: "Command line is empty",
+    receiver_hid_line_too_long: "Command line is too long (HID max 61 bytes)",
+    receiver_hid_hidapi_failed: "Failed to initialize HID: {error}",
+    receiver_hid_no_device: "Receiver USB device not found",
+    receiver_hid_no_response:
+      "No valid HID response from receiver; ensure firmware enables HID command channel",
+    receiver_hid_read_timeout: "Receiver HID response timed out",
+    receiver_hid_read_failed: "Receiver HID read failed: {error}",
+    receiver_hid_bad_frame: "Receiver HID frame format is invalid or does not match the protocol",
+    receiver_hid_duplicate_chunk: "Receiver HID received a duplicate chunk index",
+    receiver_hid_incomplete_frames: "Receiver HID response is incomplete (missing LAST frame or chunks)",
     window_create_failed: "Failed to create window: {detail}",
     ble_ota_btleplug_error: "Bluetooth operation failed: {error}",
     ble_ota_io_error: "Failed to read file: {error}",

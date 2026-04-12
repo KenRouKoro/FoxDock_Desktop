@@ -3,14 +3,16 @@ import {
   computed,
   inject,
   markRaw,
+  nextTick,
   onMounted,
   onUnmounted,
   ref,
   shallowRef,
+  watch,
   type Ref,
 } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "vue-i18n";
@@ -22,17 +24,30 @@ import Settings from "./views/Settings.vue";
 import NotificationManager from "./components/NotificationManager.vue";
 import BaseSpinner from "./components/ui/BaseSpinner.vue";
 import WindowTitleBar from "./components/ui/WindowTitleBar.vue";
+import ContextMenuShell from "./components/ContextMenuShell.vue";
 import DebugConsole from "./components/DebugConsole.vue";
 import SerialConsole from "./components/SerialConsole.vue";
+import ReceiverHidResultModal from "./components/ReceiverHidResultModal.vue";
 import { resolveBackendI18nMessage, resolveMessage as resolveBackendMessage } from "./utils/backendI18n";
+import {
+  parseRssiScanMessage,
+  parseStoredDevicesList,
+  type RssiScanParsed,
+} from "./utils/receiverHidRichMessage";
 import {
   SYSTEM_SETTINGS_INJECTION_KEY,
   type LanguagePreference,
   type SystemSettings,
 } from "./types/settings";
 import { resolveLocaleFromPreference } from "./utils/locale";
+import { clampWindowPosition } from "./utils/contextMenu";
 import type { DockInfo, DockPort, TrackerStatus } from "./types/dock";
 import type {
+  ContextMenuSelection,
+  OpenContextMenuWindowRequest,
+} from "./types/contextMenu";
+import type {
+  ReceiverHidCommandResult,
   ReceiverStatus,
   SerialConsoleTargetHint,
 } from "./types/serialConsole";
@@ -111,7 +126,9 @@ interface Notification {
 const searchParams = new URLSearchParams(window.location.search);
 const isDebugWindow = ref(searchParams.get("debug") === "true");
 const isSerialConsoleWindow = ref(searchParams.get("serialConsole") === "true");
+const isContextMenuWindow = ref(searchParams.get("contextMenu") === "true");
 const currentView = ref<'home' | 'flashing' | 'settings'>('home');
+const mainContentRef = ref<HTMLElement | null>(null);
 
 // --- 状态定义 ---
 const docks = ref<DockPort[]>([]);
@@ -143,6 +160,12 @@ const appUpdateStatusText = computed(() =>
 const pendingAppUpdate = shallowRef<Awaited<ReturnType<typeof check>> | null>(null);
 const windowDockingBusy = ref(false);
 const windowAlwaysOnTop = ref(false);
+const receiverHidResultOpen = ref(false);
+const receiverHidResultVariant = ref<"rssi" | "list">("rssi");
+const receiverHidResultTruncated = ref(false);
+const receiverHidRssiData = ref<RssiScanParsed | null>(null);
+const receiverHidListMacs = ref<string[] | null>(null);
+const receiverHidResultRaw = ref("");
 const firmwareBusy = ref(false);
 const firmwareTrackerId = ref(1);
 const firmwareFile = ref<FirmwareFile | null>(null);
@@ -215,6 +238,8 @@ function stopOverlayTimer() {
 }
 let unlistenDock: (() => void) | null = null;
 let unlistenFirmware: (() => void) | null = null;
+let unlistenReceiverStatus: (() => void) | null = null;
+let unlistenContextMenu: (() => void) | null = null;
 
 // --- 通知逻辑 ---
 function addNotification(message: string, type: 'info' | 'success' | 'error' = 'info') {
@@ -438,7 +463,6 @@ async function refreshTrackerStatus(): Promise<void> {
       autoSleepEnabled.value = result.auto_sleep;
     }
     await scanUsbTopology();
-    await refreshReceiverStatus({ silent: true });
   } catch (error) {
     pushLog(t('notifications.tracker_status_failed', { msg: getErrorMessage(error) }), 'error');
   }
@@ -875,6 +899,153 @@ const openSerialConsole = async (targetHint: SerialConsoleTargetHint) => {
   }
 };
 
+const RECEIVER_HID_NOTIFY_MAX = 2000;
+
+function clipReceiverHidDetail(text: string): string {
+  const s = text.trim();
+  if (s.length <= RECEIVER_HID_NOTIFY_MAX) return s || "OK";
+  return `${s.slice(0, RECEIVER_HID_NOTIFY_MAX)}…`;
+}
+
+async function closeContextMenuWindowsSafe(): Promise<void> {
+  try {
+    await invoke("close_context_menu_windows");
+  } catch {
+    /* ignore */
+  }
+}
+
+watch(currentView, () => {
+  void closeContextMenuWindowsSafe();
+});
+
+async function openContextMenuFromMain(req: OpenContextMenuWindowRequest): Promise<void> {
+  const { screenX, screenY, width, height, payload } = req;
+  const { x, y } = clampWindowPosition(screenX, screenY, width, height);
+  await invoke("open_context_menu_window", {
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    payloadJson: JSON.stringify(payload),
+  });
+}
+
+async function handleContextMenuSelection(p: ContextMenuSelection): Promise<void> {
+  try {
+    switch (p.kind) {
+      case "tracker-open-console":
+        await openSerialConsole({ deviceType: "tracker", trackerId: p.trackerId });
+        break;
+      case "tracker-action":
+        await runSingleAction(p.action, p.trackerId);
+        break;
+      case "receiver-open-console":
+        await openSerialConsole({ deviceType: "receiver" });
+        break;
+      case "receiver-hid-line":
+        await runReceiverHidLine(p.line);
+        break;
+      case "receiver-param":
+        await emit("receiver-context-param-open", { cmdKey: p.cmdKey });
+        break;
+      default:
+        break;
+    }
+  } finally {
+    await nextTick();
+    await closeContextMenuWindowsSafe();
+  }
+}
+
+function onMainPointerDown(): void {
+  if (isContextMenuWindow.value || isSerialConsoleWindow.value || isDebugWindow.value) return;
+  void closeContextMenuWindowsSafe();
+}
+
+function onMainScroll(): void {
+  if (isContextMenuWindow.value || isSerialConsoleWindow.value || isDebugWindow.value) return;
+  void closeContextMenuWindowsSafe();
+}
+
+async function runReceiverHidLine(line: string): Promise<void> {
+  try {
+    const res = await invoke<ReceiverHidCommandResult>("send_receiver_hid_console_line", {
+      line,
+    });
+    const detail = clipReceiverHidDetail(res.message);
+    const rawFull = res.message.trim();
+    if (res.ok) {
+      const rssiParsed = parseRssiScanMessage(rawFull);
+      const listParsed = parseStoredDevicesList(rawFull);
+
+      if (rssiParsed) {
+        if (
+          rssiParsed.recommendedChannel != null &&
+          rssiParsed.recommendedDbm != null
+        ) {
+          pushLog(
+            t("notifications.receiver_hid_rssi_summary", {
+              ch: rssiParsed.recommendedChannel,
+              dbm: rssiParsed.recommendedDbm,
+            }),
+            "success",
+          );
+        } else {
+          pushLog(t("notifications.receiver_hid_rssi_summary_no_rec"), "success");
+        }
+        receiverHidResultVariant.value = "rssi";
+        receiverHidRssiData.value = rssiParsed;
+        receiverHidListMacs.value = null;
+        receiverHidResultRaw.value = rawFull;
+        receiverHidResultTruncated.value = !!res.truncated;
+        receiverHidResultOpen.value = true;
+        return;
+      }
+
+      if (listParsed) {
+        pushLog(
+          t("notifications.receiver_hid_list_summary", { count: listParsed.length }),
+          "success",
+        );
+        receiverHidResultVariant.value = "list";
+        receiverHidRssiData.value = null;
+        receiverHidListMacs.value = listParsed;
+        receiverHidResultRaw.value = rawFull;
+        receiverHidResultTruncated.value = !!res.truncated;
+        receiverHidResultOpen.value = true;
+        return;
+      }
+
+      if (res.truncated) {
+        pushLog(
+          t("notifications.receiver_hid_truncated", {
+            line: res.line,
+            msg: detail,
+          }),
+          "info",
+        );
+      } else {
+        pushLog(t("notifications.receiver_hid_success", { line: res.line, msg: detail }), "success");
+      }
+    } else {
+      pushLog(
+        t("notifications.receiver_hid_failed", {
+          line: res.line,
+          code: res.statusCode,
+          msg: detail ? ` ${detail}` : "",
+        }),
+        "error",
+      );
+    }
+  } catch (error) {
+    pushLog(
+      t("notifications.receiver_hid_invoke_failed", { msg: getErrorMessage(error) }),
+      "error",
+    );
+  }
+}
+
 function buildWindowDockingConfig(settings: SystemSettings = systemSettings.value): WindowDockingConfig {
   return {
     autoDockOnStartup: settings.autoDockOnStartup,
@@ -1058,7 +1229,7 @@ async function installAppUpdate(): Promise<void> {
 
 // --- 生命周期 ---
 onMounted(async () => {
-  if (isSerialConsoleWindow.value) {
+  if (isSerialConsoleWindow.value || isDebugWindow.value || isContextMenuWindow.value) {
     return;
   }
   // 须尽早调度：若放在 refreshDocks 等 await 之后，底座扫描慢时用户会感觉「启动从未检测更新」
@@ -1069,6 +1240,15 @@ onMounted(async () => {
   }
 
   await syncWindowAlwaysOnTopState();
+  unlistenReceiverStatus = await listen<ReceiverStatus>(
+    "receiver-status-changed",
+    (event) => {
+      receiverStatus.value = event.payload;
+    },
+  );
+  unlistenContextMenu = await listen<ContextMenuSelection>("context-menu-selection", (event) => {
+    void handleContextMenuSelection(event.payload);
+  });
   unlistenDock = await listen<any>("dock-event", (event) => {
     if (isDebugWindow.value) return; 
     const data = event.payload;
@@ -1164,6 +1344,8 @@ onMounted(async () => {
 onUnmounted(() => {
   if (unlistenDock) unlistenDock();
   if (unlistenFirmware) unlistenFirmware();
+  if (unlistenReceiverStatus) unlistenReceiverStatus();
+  if (unlistenContextMenu) unlistenContextMenu();
   if (connectionMonitorTimer) {
     clearInterval(connectionMonitorTimer);
     connectionMonitorTimer = null;
@@ -1176,12 +1358,23 @@ onUnmounted(() => {
 
   <DebugConsole v-else-if="isDebugWindow" />
 
+  <ContextMenuShell v-else-if="isContextMenuWindow" />
+
   <main v-else class="page">
     <WindowTitleBar
       :is-always-on-top="windowAlwaysOnTop"
       :docking-busy="windowDockingBusy"
       @toggle-always-on-top="toggleWindowAlwaysOnTop"
       @redock-windows="dockWithSlimeVr({ announce: true })"
+    />
+
+    <ReceiverHidResultModal
+      v-model:open="receiverHidResultOpen"
+      :variant="receiverHidResultVariant"
+      :truncated="receiverHidResultTruncated"
+      :rssi-data="receiverHidRssiData"
+      :list-macs="receiverHidListMacs"
+      :raw-text="receiverHidResultRaw"
     />
 
     <!-- 全屏遮罩层 -->
@@ -1200,7 +1393,12 @@ onUnmounted(() => {
       </div>
     </Teleport>
 
-    <div class="main-content">
+    <div
+      ref="mainContentRef"
+      class="main-content"
+      @scroll="onMainScroll"
+      @pointerdown.capture="onMainPointerDown"
+    >
       <Home
         v-if="currentView === 'home'"
         :docks="docks"
@@ -1224,6 +1422,8 @@ onUnmounted(() => {
         @set-bl-mode="setBlMode"
         @set-auto-sleep="setAutoSleep"
         @open-serial-console="openSerialConsole"
+        @open-context-menu="openContextMenuFromMain"
+        @run-receiver-hid-line="runReceiverHidLine"
       />
       <KeepAlive>
         <TrackerFlashing

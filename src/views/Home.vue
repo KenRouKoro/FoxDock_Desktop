@@ -4,10 +4,13 @@ import { useI18n } from "vue-i18n";
 import ConnectionPanel from "../components/ConnectionPanel.vue";
 import TrackerStatusComponent from "../components/TrackerStatus.vue";
 import TrackerControl from "../components/TrackerControl.vue";
+import ReceiverStatusCard from "../components/ReceiverStatusCard.vue";
+import ReceiverOperationsPanel from "../components/ReceiverOperationsPanel.vue";
 import BaseTabs from "../components/ui/BaseTabs.vue";
 import PageHeader from "../components/ui/PageHeader.vue";
 import logoUrl from "../assets/FoxApplication.png";
 import type { DockInfo, DockPort, TrackerStatus } from "../types/dock";
+import type { OpenContextMenuWindowRequest } from "../types/contextMenu";
 import type {
   ReceiverStatus,
   SerialConsoleTargetHint,
@@ -40,9 +43,11 @@ const emit = defineEmits<{
   (e: "setBlMode", mode: number): void;
   (e: "setAutoSleep", enabled: boolean): void;
   (e: "openSerialConsole", targetHint: SerialConsoleTargetHint): void;
+  (e: "openContextMenu", req: OpenContextMenuWindowRequest): void;
+  (e: "runReceiverHidLine", line: string): void;
 }>();
 
-type HomeTab = "trackers" | "control";
+type HomeTab = "trackers" | "control" | "receiver";
 
 const activeTab = ref<HomeTab>("trackers");
 const isConnectionPanelExpanded = ref(true);
@@ -64,6 +69,15 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => props.receiverStatus.inserted,
+  (inserted) => {
+    if (!inserted && activeTab.value === "receiver") {
+      activeTab.value = "trackers";
+    }
+  },
+);
+
 function toggleConnectionPanel() {
   isConnectionPanelExpanded.value = !isConnectionPanelExpanded.value;
 }
@@ -71,6 +85,11 @@ function toggleConnectionPanel() {
 const homeTabs = computed(() => [
   { key: "trackers", label: t("home.tab_trackers") },
   { key: "control", label: t("home.tab_control") },
+  {
+    key: "receiver",
+    label: t("home.tab_receiver_ops"),
+    disabled: !props.receiverStatus.inserted,
+  },
 ]);
 </script>
 
@@ -140,6 +159,14 @@ const homeTabs = computed(() => [
       </div>
     </section>
 
+    <ReceiverStatusCard
+      :receiver-status="receiverStatus"
+      :disabled="loading"
+      @open-serial-console="(targetHint) => emit('openSerialConsole', targetHint)"
+      @open-context-menu="(req) => emit('openContextMenu', req)"
+      @run-receiver-hid-line="(line) => emit('runReceiverHidLine', line)"
+    />
+
     <BaseTabs
       v-model="activeTab"
       :tabs="homeTabs"
@@ -150,10 +177,10 @@ const homeTabs = computed(() => [
       <div v-show="activeTab === 'trackers'" role="tabpanel">
         <TrackerStatusComponent
           :trackers="trackers"
-          :receiver-status="receiverStatus"
           :disabled="loading || !connectedPortName"
           @run-single-action="(action, id) => emit('runSingleAction', action, id)"
           @open-serial-console="(targetHint) => emit('openSerialConsole', targetHint)"
+          @open-context-menu="(req) => emit('openContextMenu', req)"
         />
       </div>
       <div v-show="activeTab === 'control'" role="tabpanel">
@@ -173,6 +200,13 @@ const homeTabs = computed(() => [
           @set-auto-sleep="(enabled) => emit('setAutoSleep', enabled)"
         />
       </div>
+      <div v-show="activeTab === 'receiver'" role="tabpanel">
+        <ReceiverOperationsPanel
+          :receiver-inserted="receiverStatus.inserted"
+          :loading="loading"
+          @run-receiver-hid-line="(line) => emit('runReceiverHidLine', line)"
+        />
+      </div>
     </div>
   </div>
 </template>
@@ -190,4 +224,5 @@ const homeTabs = computed(() => [
   gap: 0;
   min-height: 0;
 }
+
 </style>

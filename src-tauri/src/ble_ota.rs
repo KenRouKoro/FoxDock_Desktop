@@ -16,7 +16,9 @@ use uuid::Uuid;
 use windows::{
     core::{GUID, Ref},
     Devices::Bluetooth::{
-        BluetoothCacheMode, BluetoothLEDevice, BluetoothLEPreferredConnectionParameters,
+        BluetoothAdapter, BluetoothCacheMode, BluetoothLEDevice,
+        BluetoothLEPreferredConnectionParameters,
+        BluetoothLEPreferredConnectionParametersRequest,
         GenericAttributeProfile::{
             GattCharacteristic, GattClientCharacteristicConfigurationDescriptorValue,
             GattCommunicationStatus, GattDeviceService, GattSession, GattValueChangedEventArgs,
@@ -82,6 +84,10 @@ const UPLOAD_MODE_APPLICATION: u8 = 0x04;
 /// Packet Receipt Notification 间隔 N：每 N 个固件包设备发一次 0x11 通知。
 /// WinRT 直连后链路吞吐明显改善，先把 PRN 从 4 调到 6，减少等待通知次数以继续提速。
 const DFU_PRN_INTERVAL: u16 = 6;
+// Legacy DFU bootloader 对未确认窗口非常敏感；实测超过 1 个 PRN 窗口会触发状态 6。
+const MAX_OUTSTANDING_PRN_WINDOWS: u32 = 1;
+const BACKPRESSURE_WRITE_THRESHOLD: Duration = Duration::from_millis(50);
+const BACKPRESSURE_SLEEP: Duration = Duration::from_millis(5);
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -522,6 +528,46 @@ enum FirmwareTransferEvent {
     Complete,
 }
 
+#[derive(Default)]
+struct DrainNotificationsResult {
+    prn_count: u32,
+    latest_received_bytes: u32,
+    completed: bool,
+}
+
+fn firmware_transfer_response_error(status: u8) -> String {
+    if status == 0x05 || status == 0x06 {
+        return i18n_error_with_params(
+            "backend_errors.ble_ota_dfu_fw_integrity",
+            serde_json::json!({ "status": status }),
+        );
+    }
+    i18n_error_with_params(
+        "backend_errors.ble_ota_dfu_response_error",
+        serde_json::json!({
+            "procedure": OP_RECEIVE_FW,
+            "status": status,
+        }),
+    )
+}
+
+fn parse_firmware_transfer_event(value: &[u8]) -> Option<Result<FirmwareTransferEvent, String>> {
+    if value.len() >= 5 && value[0] == OP_PRN_NOTIFY {
+        let received = u32::from_le_bytes([value[1], value[2], value[3], value[4]]);
+        return Some(Ok(FirmwareTransferEvent::Prn(received)));
+    }
+
+    if value.len() >= 3 && value[0] == OP_RESPONSE && value[1] == OP_RECEIVE_FW {
+        return Some(if value[2] == RESP_SUCCESS {
+            Ok(FirmwareTransferEvent::Complete)
+        } else {
+            Err(firmware_transfer_response_error(value[2]))
+        });
+    }
+
+    None
+}
+
 async fn wait_firmware_transfer_event(
     notifications: &mut tokio::sync::mpsc::UnboundedReceiver<BleNotification>,
     cp_uuid: Uuid,
@@ -553,37 +599,53 @@ async fn wait_firmware_transfer_event(
             continue;
         }
 
-        let v = notification.value;
-        if v.len() >= 5 && v[0] == OP_PRN_NOTIFY {
-            let received = u32::from_le_bytes([v[1], v[2], v[3], v[4]]);
-            eprintln!(
-                "[ble_ota] prn notify: received_bytes={} expected_min={}",
-                received, expected_min_bytes
-            );
-            if received >= expected_min_bytes {
-                return Ok(FirmwareTransferEvent::Prn(received));
+        if let Some(event) = parse_firmware_transfer_event(&notification.value) {
+            match event? {
+                FirmwareTransferEvent::Prn(received) => {
+                    eprintln!(
+                        "[ble_ota] prn notify: received_bytes={} expected_min={}",
+                        received, expected_min_bytes
+                    );
+                    if received >= expected_min_bytes {
+                        return Ok(FirmwareTransferEvent::Prn(received));
+                    }
+                }
+                FirmwareTransferEvent::Complete => return Ok(FirmwareTransferEvent::Complete),
             }
-            continue;
         }
+    }
+}
 
-        if v.len() >= 3 && v[0] == OP_RESPONSE && v[1] == OP_RECEIVE_FW {
-            if v[2] == RESP_SUCCESS {
-                return Ok(FirmwareTransferEvent::Complete);
+fn drain_pending_notifications(
+    notifications: &mut tokio::sync::mpsc::UnboundedReceiver<BleNotification>,
+    cp_uuid: Uuid,
+) -> Result<DrainNotificationsResult, String> {
+    let mut result = DrainNotificationsResult::default();
+    loop {
+        match notifications.try_recv() {
+            Ok(notification) => {
+                if notification.uuid != cp_uuid {
+                    continue;
+                }
+                if let Some(event) = parse_firmware_transfer_event(&notification.value) {
+                    match event? {
+                        FirmwareTransferEvent::Prn(received) => {
+                            eprintln!("[ble_ota] prn notify (drain): received_bytes={received}");
+                            result.prn_count += 1;
+                            result.latest_received_bytes =
+                                result.latest_received_bytes.max(received);
+                        }
+                        FirmwareTransferEvent::Complete => {
+                            result.completed = true;
+                            return Ok(result);
+                        }
+                    }
+                }
             }
-            let st = v[2];
-            if st == 0x05 || st == 0x06 {
-                return Err(i18n_error_with_params(
-                    "backend_errors.ble_ota_dfu_fw_integrity",
-                    serde_json::json!({ "status": st }),
-                ));
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Ok(result),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                return Err(i18n_error("backend_errors.ble_ota_disconnected"));
             }
-            return Err(i18n_error_with_params(
-                "backend_errors.ble_ota_dfu_response_error",
-                serde_json::json!({
-                    "procedure": OP_RECEIVE_FW,
-                    "status": st,
-                }),
-            ));
         }
     }
 }
@@ -767,14 +829,86 @@ struct WinRtDfuTransport {
     pkt: GattCharacteristic,
     notifications: tokio::sync::mpsc::UnboundedReceiver<BleNotification>,
     cp_notify_token: i64,
+    connection_params_changed_token: Option<i64>,
+    connection_phy_changed_token: Option<i64>,
+    _preferred_connection_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
 }
 
 impl Drop for WinRtDfuTransport {
     fn drop(&mut self) {
         let _ = self.cp.RemoveValueChanged(self.cp_notify_token);
+        if let Some(token) = self.connection_params_changed_token {
+            let _ = self.device.RemoveConnectionParametersChanged(token);
+        }
+        if let Some(token) = self.connection_phy_changed_token {
+            let _ = self.device.RemoveConnectionPhyChanged(token);
+        }
         let _ = self.session.Close();
         let _ = self.service.Close();
         let _ = self.device.Close();
+    }
+}
+
+fn log_connection_parameters(device: &BluetoothLEDevice, label: &str) {
+    match device.GetConnectionParameters() {
+        Ok(params) => {
+            let ci = params.ConnectionInterval().ok().unwrap_or(0);
+            let latency = params.ConnectionLatency().ok().unwrap_or(0);
+            let timeout = params.LinkTimeout().ok().unwrap_or(0);
+            eprintln!(
+                "[ble_ota][winrt] connection params ({label}): ci_units={} ci_ms={:.2} latency={} timeout_units={} timeout_ms={}",
+                ci,
+                ci as f64 * 1.25,
+                latency,
+                timeout,
+                timeout as u32 * 10
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "[ble_ota][winrt] connection params ({label}) unavailable: {}",
+                err
+            );
+        }
+    }
+}
+
+fn log_connection_phy(device: &BluetoothLEDevice, label: &str) {
+    match device.GetConnectionPhy() {
+        Ok(phy) => {
+            let tx_phy = match phy.TransmitInfo() {
+                Ok(info) => {
+                    if info.IsUncoded2MPhy().unwrap_or(false) {
+                        "2M"
+                    } else if info.IsCodedPhy().unwrap_or(false) {
+                        "Coded"
+                    } else {
+                        "1M"
+                    }
+                }
+                Err(_) => "unknown",
+            };
+            let rx_phy = match phy.ReceiveInfo() {
+                Ok(info) => {
+                    if info.IsUncoded2MPhy().unwrap_or(false) {
+                        "2M"
+                    } else if info.IsCodedPhy().unwrap_or(false) {
+                        "Coded"
+                    } else {
+                        "1M"
+                    }
+                }
+                Err(_) => "unknown",
+            };
+            eprintln!(
+                "[ble_ota][winrt] connection PHY ({label}): tx={tx_phy} rx={rx_phy}"
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "[ble_ota][winrt] connection PHY ({label}) unavailable: {err}"
+            );
+        }
     }
 }
 
@@ -790,10 +924,68 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
         open_start.elapsed().as_millis()
     );
 
-    if let Ok(preferred) = BluetoothLEPreferredConnectionParameters::ThroughputOptimized() {
-        let _ = device.RequestPreferredConnectionParameters(&preferred);
-        eprintln!("[ble_ota][winrt] requested throughput optimized connection parameters");
+    if let Ok(op) = BluetoothAdapter::GetDefaultAsync() {
+        if let Ok(adapter) = op.await {
+            let supports_2m = adapter
+                .IsLowEnergyUncoded2MPhySupported()
+                .unwrap_or(false);
+            let supports_coded =
+                adapter.IsLowEnergyCodedPhySupported().unwrap_or(false);
+            eprintln!(
+                "[ble_ota][winrt] adapter PHY capabilities: 2M={supports_2m} coded={supports_coded}"
+            );
+        }
     }
+
+    log_connection_phy(&device, "initial");
+
+    let preferred_connection_request =
+        if let Ok(preferred) = BluetoothLEPreferredConnectionParameters::ThroughputOptimized() {
+            match device.RequestPreferredConnectionParameters(&preferred) {
+                Ok(request) => {
+                    eprintln!(
+                        "[ble_ota][winrt] requested throughput optimized connection parameters"
+                    );
+                    Some(request)
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[ble_ota][winrt] request throughput optimized parameters failed: {}",
+                        err
+                    );
+                    None
+                }
+            }
+        } else {
+            eprintln!(
+                "[ble_ota][winrt] throughput optimized connection parameters unavailable"
+            );
+            None
+        };
+    log_connection_parameters(&device, "after_request");
+    log_connection_phy(&device, "after_request");
+
+    let connection_params_changed_token = device
+        .ConnectionParametersChanged(&TypedEventHandler::new(
+            move |device: Ref<BluetoothLEDevice>, _| {
+                if let Ok(device) = device.ok() {
+                    log_connection_parameters(&device, "changed");
+                }
+                Ok(())
+            },
+        ))
+        .ok();
+
+    let connection_phy_changed_token = device
+        .ConnectionPhyChanged(&TypedEventHandler::new(
+            move |device: Ref<BluetoothLEDevice>, _| {
+                if let Ok(device) = device.ok() {
+                    log_connection_phy(&device, "changed");
+                }
+                Ok(())
+            },
+        ))
+        .ok();
 
     let service_uuid = nordic_dfu_uuid(0x1530);
     let cp_uuid = nordic_dfu_uuid(0x1531);
@@ -816,6 +1008,8 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
         session.CanMaintainConnection().ok().unwrap_or(false),
         session.MaintainConnection().ok().unwrap_or(false)
     );
+    log_connection_parameters(&device, "session_ready");
+    log_connection_phy(&device, "session_ready");
 
     let chars_start = Instant::now();
     let cp = first_characteristic_by_uuid(&service, cp_uuid, "backend_errors.ble_ota_cp_missing").await?;
@@ -876,6 +1070,8 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
         "[ble_ota][winrt] notifications enabled: elapsed_ms={}",
         notify_start.elapsed().as_millis()
     );
+    log_connection_parameters(&device, "notify_ready");
+    log_connection_phy(&device, "notify_ready");
 
     Ok(WinRtDfuTransport {
         device,
@@ -885,6 +1081,9 @@ async fn open_winrt_dfu_transport(peripheral_id: &str) -> Result<WinRtDfuTranspo
         pkt,
         notifications: rx,
         cp_notify_token: token,
+        connection_params_changed_token,
+        connection_phy_changed_token,
+        _preferred_connection_request: preferred_connection_request,
     })
 }
 
@@ -1033,7 +1232,7 @@ pub async fn start_ble_ota(
             init_resp_start.elapsed().as_millis()
         );
 
-        // PRN：小端 N。这里对齐 nRF Connect Android 在该设备上的默认行为：4 包一通知。
+        // PRN：小端 N。该设备实测最佳值固定为 6，保持与手机端一致。
         let prn_n = DFU_PRN_INTERVAL.to_le_bytes();
         let prn_cfg_start = Instant::now();
         winrt_write(&cp, &[OP_PRN, prn_n[0], prn_n[1]], GattWriteOption::WriteWithResponse, "op_prn")
@@ -1070,12 +1269,20 @@ pub async fn start_ble_ota(
         let mut offset = 0usize;
         let prn_every = u32::from(DFU_PRN_INTERVAL);
         let mut last_progress_pct: u8 = 15;
-        let mut packets_until_prn = prn_every.max(1);
         let mut transfer_completed = false;
         let mut firmware_write_calls: u64 = 0;
         let mut firmware_write_bytes: u64 = 0;
         let mut firmware_write_total = Duration::ZERO;
         let mut firmware_write_max = Duration::ZERO;
+        let mut packets_in_window = 0u32;
+        let mut outstanding_windows = 0u32;
+        let mut outstanding_windows_max = 0u32;
+        let mut confirmed_bytes = 0u64;
+        let mut prn_window_index: u64 = 0;
+        let mut window_write_packets = 0u32;
+        let mut window_write_bytes = 0u64;
+        let mut window_write_total = Duration::ZERO;
+        let mut prn_notify_count: u64 = 0;
         let mut prn_wait_count: u64 = 0;
         let mut prn_wait_total = Duration::ZERO;
         let mut prn_wait_max = Duration::ZERO;
@@ -1095,83 +1302,171 @@ pub async fn start_ble_ota(
             firmware_write_bytes += slice.len() as u64;
             firmware_write_total += pkt_write_elapsed;
             firmware_write_max = firmware_write_max.max(pkt_write_elapsed);
+            window_write_packets += 1;
+            window_write_bytes += slice.len() as u64;
+            window_write_total += pkt_write_elapsed;
+            if pkt_write_elapsed > BACKPRESSURE_WRITE_THRESHOLD {
+                eprintln!(
+                    "[ble_ota][timing] backpressure detected: write_ms={} offset={}",
+                    pkt_write_elapsed.as_millis(),
+                    end
+                );
+                tokio::time::sleep(BACKPRESSURE_SLEEP).await;
+            }
 
             offset = end;
             let sent = offset as u64;
-            packets_until_prn = packets_until_prn.saturating_sub(1);
+            packets_in_window += 1;
 
-            // 更接近 nRF Connect Android 的 credit 模型：
-            // 连续发送 N 包后等待一个 PRN，再恢复下一轮额度；最后一包后等待完成响应。
-            let reached_end = offset >= bin_data.len();
-            if packets_until_prn == 0 || reached_end {
-                let wait_start = Instant::now();
-                let confirmed = match wait_firmware_transfer_event(
-                    notifications,
-                    cp_uuid,
-                    sent as u32,
-                    if reached_end {
-                        Duration::from_secs(120)
-                    } else {
-                        Duration::from_secs(30)
-                    },
-                )
-                .await?
-                {
-                    FirmwareTransferEvent::Prn(received) => {
-                        let wait_elapsed = wait_start.elapsed();
-                        prn_wait_count += 1;
-                        prn_wait_total += wait_elapsed;
-                        prn_wait_max = prn_wait_max.max(wait_elapsed);
-                        packets_until_prn = prn_every.max(1);
-                        u64::from(received).min(total)
+            let mut should_log_progress = false;
+            if packets_in_window >= prn_every {
+                prn_window_index += 1;
+                let window_confirmed_before = confirmed_bytes;
+                let window_sent = sent;
+                let window_outstanding_before = outstanding_windows;
+                let mut window_wait_elapsed = Duration::ZERO;
+                let mut window_log_source = "drain";
+                packets_in_window = 0;
+                outstanding_windows += 1;
+                outstanding_windows_max = outstanding_windows_max.max(outstanding_windows);
+
+                let drained = drain_pending_notifications(notifications, cp_uuid)?;
+                if drained.prn_count > 0 {
+                    prn_notify_count += u64::from(drained.prn_count);
+                    outstanding_windows = outstanding_windows.saturating_sub(drained.prn_count);
+                    confirmed_bytes =
+                        confirmed_bytes.max(u64::from(drained.latest_received_bytes).min(total));
+                    should_log_progress = true;
+                }
+                if drained.completed {
+                    transfer_completed = true;
+                    confirmed_bytes = total;
+                }
+
+                while !transfer_completed && outstanding_windows >= MAX_OUTSTANDING_PRN_WINDOWS {
+                    let wait_start = Instant::now();
+                    let expected_min = confirmed_bytes
+                        .saturating_add(1)
+                        .min(total)
+                        .try_into()
+                        .unwrap_or(u32::MAX);
+                    match wait_firmware_transfer_event(
+                        notifications,
+                        cp_uuid,
+                        expected_min,
+                        Duration::from_secs(30),
+                    )
+                    .await?
+                    {
+                        FirmwareTransferEvent::Prn(received) => {
+                            let wait_elapsed = wait_start.elapsed();
+                            window_wait_elapsed += wait_elapsed;
+                            window_log_source = "wait";
+                            prn_wait_count += 1;
+                            prn_wait_total += wait_elapsed;
+                            prn_wait_max = prn_wait_max.max(wait_elapsed);
+                            prn_notify_count += 1;
+                            outstanding_windows = outstanding_windows.saturating_sub(1);
+                            confirmed_bytes = confirmed_bytes.max(u64::from(received).min(total));
+                            should_log_progress = true;
+                        }
+                        FirmwareTransferEvent::Complete => {
+                            let wait_elapsed = wait_start.elapsed();
+                            window_wait_elapsed += wait_elapsed;
+                            window_log_source = "complete";
+                            prn_wait_count += 1;
+                            prn_wait_total += wait_elapsed;
+                            prn_wait_max = prn_wait_max.max(wait_elapsed);
+                            transfer_completed = true;
+                            confirmed_bytes = total;
+                            should_log_progress = true;
+                        }
                     }
-                    FirmwareTransferEvent::Complete => {
-                        let wait_elapsed = wait_start.elapsed();
-                        prn_wait_count += 1;
-                        prn_wait_total += wait_elapsed;
-                        prn_wait_max = prn_wait_max.max(wait_elapsed);
-                        transfer_completed = true;
-                        total
-                    }
+                }
+
+                eprintln!(
+                    "[ble_ota][window] idx={} source={} sent={}/{} confirmed={}/{} delta_confirmed={} write_packets={} write_bytes={} write_ms={} wait_ms={} cycle_ms={} outstanding_before={} outstanding_after={} lag_bytes={}",
+                    prn_window_index,
+                    window_log_source,
+                    window_sent,
+                    total,
+                    confirmed_bytes,
+                    total,
+                    confirmed_bytes.saturating_sub(window_confirmed_before),
+                    window_write_packets,
+                    window_write_bytes,
+                    window_write_total.as_millis(),
+                    window_wait_elapsed.as_millis(),
+                    (window_write_total + window_wait_elapsed).as_millis(),
+                    window_outstanding_before,
+                    outstanding_windows,
+                    window_sent.saturating_sub(confirmed_bytes)
+                );
+                window_write_packets = 0;
+                window_write_bytes = 0;
+                window_write_total = Duration::ZERO;
+            }
+
+            let progress_bytes = sent.max(confirmed_bytes);
+            let progress_pct = (15u64 + (progress_bytes * 70 / total.max(1))) as u8;
+            let clamped = progress_pct.min(85);
+            if clamped != last_progress_pct {
+                last_progress_pct = clamped;
+                emit_ble_ota_progress(
+                    &app_clone,
+                    "transferring",
+                    clamped,
+                    i18n_error("ble_ota.progress_transferring"),
+                    Some(progress_bytes),
+                    Some(total),
+                );
+            }
+
+            if should_log_progress || transfer_completed {
+                let avg_write_ms = if firmware_write_calls > 0 {
+                    firmware_write_total.as_secs_f64() * 1000.0 / firmware_write_calls as f64
+                } else {
+                    0.0
                 };
+                let avg_prn_wait_ms = if prn_wait_count > 0 {
+                    prn_wait_total.as_secs_f64() * 1000.0 / prn_wait_count as f64
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "[ble_ota][timing] fw progress: sent={}/{} confirmed={}/{} packets={} prn_notifies={} blocking_waits={} outstanding_windows={} max_outstanding_windows={} avg_write_ms={:.2} max_write_ms={} avg_wait_ms={:.2} max_wait_ms={}",
+                    sent,
+                    total,
+                    confirmed_bytes,
+                    total,
+                    firmware_write_calls,
+                    prn_notify_count,
+                    prn_wait_count,
+                    outstanding_windows,
+                    outstanding_windows_max,
+                    avg_write_ms,
+                    firmware_write_max.as_millis(),
+                    avg_prn_wait_ms,
+                    prn_wait_max.as_millis()
+                );
+            }
 
-                if prn_wait_count <= 5 || prn_wait_count % 25 == 0 || transfer_completed {
-                    let avg_write_ms = if firmware_write_calls > 0 {
-                        firmware_write_total.as_secs_f64() * 1000.0 / firmware_write_calls as f64
-                    } else {
-                        0.0
-                    };
-                    let avg_prn_wait_ms = if prn_wait_count > 0 {
-                        prn_wait_total.as_secs_f64() * 1000.0 / prn_wait_count as f64
-                    } else {
-                        0.0
-                    };
-                    eprintln!(
-                        "[ble_ota][timing] fw progress: sent={}/{} packets={} prn_events={} avg_write_ms={:.2} max_write_ms={} avg_wait_ms={:.2} max_wait_ms={}",
-                        confirmed,
-                        total,
-                        firmware_write_calls,
-                        prn_wait_count,
-                        avg_write_ms,
-                        firmware_write_max.as_millis(),
-                        avg_prn_wait_ms,
-                        prn_wait_max.as_millis()
-                    );
-                }
+            if transfer_completed {
+                break;
+            }
+        }
 
-                let progress_pct = (15u64 + (confirmed * 70 / total.max(1))) as u8;
-                let clamped = progress_pct.min(85);
-                if clamped != last_progress_pct {
-                    last_progress_pct = clamped;
-                    emit_ble_ota_progress(
-                        &app_clone,
-                        "transferring",
-                        clamped,
-                        i18n_error("ble_ota.progress_transferring"),
-                        Some(confirmed),
-                        Some(total),
-                    );
-                }
+        if !transfer_completed {
+            let drained = drain_pending_notifications(notifications, cp_uuid)?;
+            if drained.prn_count > 0 {
+                prn_notify_count += u64::from(drained.prn_count);
+                outstanding_windows = outstanding_windows.saturating_sub(drained.prn_count);
+                confirmed_bytes =
+                    confirmed_bytes.max(u64::from(drained.latest_received_bytes).min(total));
+            }
+            if drained.completed {
+                transfer_completed = true;
+                confirmed_bytes = total;
             }
         }
 
@@ -1181,7 +1476,11 @@ pub async fn start_ble_ota(
                 match wait_firmware_transfer_event(
                     notifications,
                     cp_uuid,
-                    total as u32,
+                    confirmed_bytes
+                        .saturating_add(1)
+                        .min(total)
+                        .try_into()
+                        .unwrap_or(u32::MAX),
                     Duration::from_secs(120),
                 )
                 .await?
@@ -1191,7 +1490,10 @@ pub async fn start_ble_ota(
                         prn_wait_count += 1;
                         prn_wait_total += wait_elapsed;
                         prn_wait_max = prn_wait_max.max(wait_elapsed);
+                        prn_notify_count += 1;
+                        outstanding_windows = outstanding_windows.saturating_sub(1);
                         let confirmed = u64::from(received).min(total);
+                        confirmed_bytes = confirmed_bytes.max(confirmed);
                         let progress_pct = (15u64 + (confirmed * 70 / total.max(1))) as u8;
                         let clamped = progress_pct.min(85);
                         if clamped != last_progress_pct {
@@ -1227,7 +1529,7 @@ pub async fn start_ble_ota(
             }
         }
         eprintln!(
-            "[ble_ota][timing] firmware transfer summary: elapsed_ms={} write_calls={} bytes={} avg_write_ms={:.2} max_write_ms={} prn_events={} avg_wait_ms={:.2} max_wait_ms={}",
+            "[ble_ota][timing] firmware transfer summary: elapsed_ms={} write_calls={} bytes={} avg_write_ms={:.2} max_write_ms={} prn_notifies={} blocking_waits={} max_outstanding_windows={} avg_wait_ms={:.2} max_wait_ms={}",
             firmware_start.elapsed().as_millis(),
             firmware_write_calls,
             firmware_write_bytes,
@@ -1237,7 +1539,9 @@ pub async fn start_ble_ota(
                 0.0
             },
             firmware_write_max.as_millis(),
+            prn_notify_count,
             prn_wait_count,
+            outstanding_windows_max,
             if prn_wait_count > 0 {
                 prn_wait_total.as_secs_f64() * 1000.0 / prn_wait_count as f64
             } else {

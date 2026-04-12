@@ -2,6 +2,8 @@
 export interface BaseTabItem {
   key: string;
   label: string;
+  /** 为 true 时不可选中 */
+  disabled?: boolean;
 }
 
 defineProps<{
@@ -14,8 +16,9 @@ const emit = defineEmits<{
   (e: "update:modelValue", key: string): void;
 }>();
 
-function select(key: string): void {
-  emit("update:modelValue", key);
+function select(tab: BaseTabItem) {
+  if (tab.disabled) return;
+  emit("update:modelValue", tab.key);
 }
 </script>
 
@@ -27,9 +30,14 @@ function select(key: string): void {
       type="button"
       role="tab"
       class="base-tabs__tab"
-      :class="{ 'base-tabs__tab--active': modelValue === tab.key }"
+      :class="{
+        'base-tabs__tab--active': modelValue === tab.key,
+        'base-tabs__tab--disabled': tab.disabled,
+      }"
+      :disabled="tab.disabled"
+      :aria-disabled="tab.disabled ? true : undefined"
       :aria-selected="modelValue === tab.key"
-      @click="select(tab.key)"
+      @click="select(tab)"
     >
       {{ tab.label }}
     </button>
@@ -70,5 +78,19 @@ function select(key: string): void {
   background: var(--color-bg-white);
   color: var(--color-primary);
   box-shadow: inset 0 -3px 0 var(--color-primary);
+}
+
+.base-tabs__tab--disabled,
+.base-tabs__tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.base-tabs__tab--disabled.base-tabs__tab--active,
+.base-tabs__tab:disabled.base-tabs__tab--active {
+  background: transparent;
+  color: var(--color-text-light);
+  box-shadow: none;
 }
 </style>

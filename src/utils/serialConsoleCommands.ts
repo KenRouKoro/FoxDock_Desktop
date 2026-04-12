@@ -220,7 +220,7 @@ const trackerCommands: SerialConsoleLocalCommand[] = [
           max: 100,
           integer: true,
           required: true,
-          defaultValue: 37,
+          defaultValue: 84,
         },
       ],
       buildLine: (v) => {
@@ -395,7 +395,7 @@ const receiverCommands: SerialConsoleLocalCommand[] = [
           max: 100,
           integer: true,
           required: true,
-          defaultValue: 37,
+          defaultValue: 84,
         },
       ],
       buildLine: (v) => {
@@ -467,7 +467,7 @@ const receiverRemoteCommands: SerialConsoleRemoteCommand[] = [
           max: 100,
           integer: true,
           required: true,
-          defaultValue: 37,
+          defaultValue: 84,
         },
       ],
       buildTail: (v) => {
@@ -582,4 +582,43 @@ export function isDfuCommand(text: string): boolean {
   const lower = line.toLowerCase();
   if (lower === "dfu" || lower === "dfu ota") return true;
   return /^send\s+\S+\s+dfu\s*$/i.test(line);
+}
+
+/** 接收器右键「指令列表」两级菜单分组（labelKey 在 i18n `tracker_status.*`） */
+export const RECEIVER_CONTEXT_MENU_GROUPS: { labelKey: string; keys: string[] }[] = [
+  {
+    labelKey: "tracker_status.receiver_menu_general",
+    keys: ["help", "info", "uptime", "list", "clear", "exit"],
+  },
+  {
+    labelKey: "tracker_status.receiver_menu_rf",
+    keys: ["add", "pair", "channel", "clearchannel", "rssi_scan", "stats", "resetstats"],
+  },
+  {
+    labelKey: "tracker_status.receiver_menu_system",
+    keys: ["reboot", "dfu", "meow"],
+  },
+];
+
+export function buildReceiverContextMenuGroups(): {
+  labelKey: string;
+  commands: SerialConsoleLocalCommand[];
+}[] {
+  const cmds = getSerialConsoleCommands("receiver");
+  const byKey = new Map(cmds.map((c) => [c.key, c]));
+  return RECEIVER_CONTEXT_MENU_GROUPS.map((g) => ({
+    labelKey: g.labelKey,
+    commands: g.keys
+      .map((k) => byKey.get(k))
+      .filter((c): c is SerialConsoleLocalCommand => Boolean(c)),
+  }));
+}
+
+export function findReceiverLocalCommandByKey(key: string): SerialConsoleLocalCommand | null {
+  for (const g of buildReceiverContextMenuGroups()) {
+    for (const c of g.commands) {
+      if (c.key === key) return c;
+    }
+  }
+  return null;
 }

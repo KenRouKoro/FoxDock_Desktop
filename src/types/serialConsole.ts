@@ -3,6 +3,8 @@ export type SerialConsoleDeviceType = "tracker" | "receiver";
 export type SerialConsoleTargetHint = {
   deviceType: SerialConsoleDeviceType;
   trackerId?: number | null;
+  /** 打开控制台时预填到手动发送框（无参指令等） */
+  prefillLine?: string | null;
 };
 
 export type SerialConsoleState = {
@@ -17,6 +19,21 @@ export type ReceiverStatus = {
   inserted: boolean;
   portName?: string | null;
   displayName?: string | null;
+  /** HID Build Info 固件版本（与追踪器展示格式一致） */
+  receiverVersion?: string | null;
+};
+
+/** 接收器 HID_1 单行命令执行结果（`send_receiver_hid_console_line`），支持 Report 3 多帧重组 */
+export type ReceiverHidCommandResult = {
+  ok: boolean;
+  statusCode: number;
+  /** 按 chunk_idx 拼接后的完整文本 */
+  message: string;
+  line: string;
+  /** 固件侧 TRUNCATED */
+  truncated?: boolean;
+  /** 总帧数（调试用） */
+  chunkTotal?: number | null;
 };
 
 export type SerialConsoleLog = {

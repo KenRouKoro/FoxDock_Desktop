@@ -1,4 +1,6 @@
 mod ble_ota;
+mod context_menu;
+mod receiver_hid;
 mod system_settings;
 mod usb_build_info;
 mod window_docking;
@@ -7,6 +9,7 @@ mod windows_serial_friendly;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use urlencoding::encode;
 use serialport::SerialPortType;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
@@ -44,6 +47,16 @@ fn emit_debug_log(app_handle: &tauri::AppHandle, direction: &str, content: &str)
         timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
     };
     let _ = app_handle.emit("serial-debug-log", log);
+}
+
+/// 接收器 HID（Build Info / 后续握手）专用调试日志，与 `serial-debug-log` 分离。
+fn emit_receiver_hid_debug_log(app_handle: &tauri::AppHandle, content: &str) {
+    let log = DebugLog {
+        direction: "RECV-HID".to_string(),
+        content: content.to_string(),
+        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+    };
+    let _ = app_handle.emit("receiver-hid-debug-log", log);
 }
 
 const FOXDOCK_VID: u16 = 0x303A;
@@ -103,6 +116,8 @@ enum SerialConsoleDeviceType {
 struct SerialConsoleTargetHint {
     device_type: SerialConsoleDeviceType,
     tracker_id: Option<u8>,
+    #[serde(default)]
+    prefill_line: Option<String>,
 }
 
 impl Default for SerialConsoleTargetHint {
@@ -110,6 +125,7 @@ impl Default for SerialConsoleTargetHint {
         Self {
             device_type: SerialConsoleDeviceType::Tracker,
             tracker_id: None,
+            prefill_line: None,
         }
     }
 }
@@ -151,12 +167,34 @@ impl Default for SerialConsoleState {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ReceiverSerialStatus {
     inserted: bool,
     port_name: Option<String>,
     display_name: Option<String>,
+    #[serde(default)]
+    receiver_version: Option<String>,
+}
+
+/// 接收器在线/版本等快照（由后端持有，前端通过命令拉取并订阅 `receiver-status-changed`）。
+struct ReceiverState {
+    snapshot: Mutex<ReceiverSerialStatus>,
+    refresh_guard: AsyncMutex<()>,
+}
+
+impl Default for ReceiverState {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(ReceiverSerialStatus {
+                inserted: false,
+                port_name: None,
+                display_name: None,
+                receiver_version: None,
+            }),
+            refresh_guard: AsyncMutex::new(()),
+        }
+    }
 }
 
 struct FirmwareJobState {
@@ -277,11 +315,11 @@ struct FirmwareFlashResult {
 
 const I18N_ERROR_PREFIX: &str = "i18n:";
 
-fn i18n_error(key: &str) -> String {
+pub(crate) fn i18n_error(key: &str) -> String {
     format!("{I18N_ERROR_PREFIX}{key}")
 }
 
-fn i18n_error_with_params(key: &str, params: Value) -> String {
+pub(crate) fn i18n_error_with_params(key: &str, params: Value) -> String {
     format!("{I18N_ERROR_PREFIX}{key}|{params}")
 }
 
@@ -1937,6 +1975,11 @@ async fn open_serial_console_window(
     if let Some(tracker_id) = target_hint.tracker_id {
         url.push_str(&format!("&trackerId={tracker_id}"));
     }
+    if let Some(ref line) = target_hint.prefill_line {
+        if !line.is_empty() {
+            url.push_str(&format!("&prefill={}", encode(line)));
+        }
+    }
 
     let serial_console_window = tauri::WebviewWindowBuilder::new(
         &app_handle,
@@ -1989,18 +2032,98 @@ async fn list_serial_console_ports(
     .map_err(spawn_blocking_join_failed)?
 }
 
-#[tauri::command]
-async fn get_receiver_serial_status() -> Result<ReceiverSerialStatus, String> {
-    tokio::task::spawn_blocking(move || {
+/// 枚举接收器 CDC、读取 HID Build Info，更新全局快照；HID 诊断写入 `receiver-hid-debug-log`。
+async fn refresh_receiver_state(
+    app_handle: &tauri::AppHandle,
+    state: &ReceiverState,
+) -> Result<ReceiverSerialStatus, String> {
+    let _guard = state.refresh_guard.lock().await;
+    let app_for_blocking = app_handle.clone();
+    let new_snapshot = tokio::task::spawn_blocking(move || {
         let port =
             enumerate_slime_smol_serial_ports_filtered(Some(SerialConsoleDeviceType::Receiver))?
                 .into_iter()
                 .next();
-        Ok(ReceiverSerialStatus {
+        let receiver_version = port.as_ref().and_then(|p| {
+            let serial = p.serial_number.as_deref();
+            usb_build_info::read_receiver_usb_build_info_with_log(serial, |msg| {
+                emit_receiver_hid_debug_log(&app_for_blocking, msg);
+            })
+        });
+        Ok::<ReceiverSerialStatus, String>(ReceiverSerialStatus {
             inserted: port.is_some(),
             port_name: port.as_ref().map(|item| item.port_name.clone()),
             display_name: port.as_ref().map(|item| item.display_name.clone()),
+            receiver_version,
         })
+    })
+    .await
+    .map_err(spawn_blocking_join_failed)??;
+
+    let mut emit_event = false;
+    {
+        let mut guard = state.snapshot.lock().map_err(mutex_lock_failed)?;
+        if *guard != new_snapshot {
+            *guard = new_snapshot.clone();
+            emit_event = true;
+        }
+    }
+    if emit_event {
+        let _ = app_handle.emit("receiver-status-changed", &new_snapshot);
+    }
+    Ok(new_snapshot)
+}
+
+#[tauri::command]
+async fn get_receiver_serial_status(
+    app_handle: tauri::AppHandle,
+    state: State<'_, ReceiverState>,
+) -> Result<ReceiverSerialStatus, String> {
+    refresh_receiver_state(&app_handle, &state).await
+}
+
+/// 多帧 HID 结果可能较长（`info`/`help`/`rssi_scan` 等），按命令类型放宽等待时间。
+fn receiver_hid_timeout_ms_for_line(line: &str) -> u32 {
+    let lower = line.trim().to_ascii_lowercase();
+    if lower.contains("rssi_scan") {
+        return 45_000;
+    }
+    if lower.starts_with("info")
+        || lower.starts_with("help")
+        || lower.starts_with("list")
+        || lower.contains("scan")
+    {
+        return 25_000;
+    }
+    15_000
+}
+
+/// 接收器 HID_1 单行命令（Report 2/3），不经过 CDC 串口。
+#[tauri::command]
+async fn send_receiver_hid_console_line(
+    app_handle: tauri::AppHandle,
+    line: String,
+) -> Result<receiver_hid::ReceiverHidCommandResult, String> {
+    let app_for_log = app_handle.clone();
+    let timeout_ms = receiver_hid_timeout_ms_for_line(&line);
+    emit_receiver_hid_debug_log(
+        &app_for_log,
+        &format!("receiver HID cmd: invoke timeout_ms={timeout_ms} line={}\n", line.trim()),
+    );
+    tokio::task::spawn_blocking(move || {
+        let port = enumerate_slime_smol_serial_ports_filtered(Some(SerialConsoleDeviceType::Receiver))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| i18n_error("backend_errors.receiver_hid_no_device"))?;
+        let serial_hint = port.serial_number.as_deref();
+        receiver_hid::send_receiver_hid_console_line_with_log(
+            serial_hint,
+            &line,
+            timeout_ms,
+            &mut |msg| {
+                emit_receiver_hid_debug_log(&app_for_log, msg);
+            },
+        )
     })
     .await
     .map_err(spawn_blocking_join_failed)?
@@ -2153,6 +2276,8 @@ pub fn run() {
         .manage(ble_ota::BleOtaJobState::default())
         .manage(ble_ota::BleAdapterState::default())
         .manage(window_docking::WindowDockingState::default())
+        .manage(ReceiverState::default())
+        .manage(context_menu::ContextMenuState::default())
         .setup(|app| {
             if let Some(main_window) = app.get_webview_window("main") {
                 let docking_state = app.state::<window_docking::WindowDockingState>();
@@ -2188,6 +2313,7 @@ pub fn run() {
             list_slime_smol_serial_ports,
             list_serial_console_ports,
             get_receiver_serial_status,
+            send_receiver_hid_console_line,
             connect_dock,
             disconnect_dock,
             connect_serial_console,
@@ -2212,6 +2338,10 @@ pub fn run() {
             ble_ota::cancel_ble_ota,
             open_debug_window,
             open_serial_console_window,
+            context_menu::close_context_menu_windows,
+            context_menu::get_context_menu_state,
+            context_menu::open_context_menu_window,
+            context_menu::open_context_submenu_window,
             send_serial_console_text,
             scan_usb_topology,
             get_app_version,

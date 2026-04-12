@@ -245,6 +245,16 @@ const consoleState = ref<SerialConsoleState>({
 const ports = ref<DockPort[]>([]);
 const selectedPortName = ref("");
 const inputText = ref("");
+{
+  const prefillParam = searchParams.get("prefill");
+  if (prefillParam) {
+    try {
+      inputText.value = decodeURIComponent(prefillParam);
+    } catch {
+      inputText.value = prefillParam;
+    }
+  }
+}
 const appendNewline = ref(true);
 const logs = ref<ConsoleLogEntry[]>([]);
 const statusText = ref("");
@@ -797,6 +807,10 @@ onMounted(async () => {
       async (event) => {
         targetDeviceType.value = event.payload.deviceType;
         targetTrackerId.value = event.payload.trackerId ?? null;
+        const line = event.payload.prefillLine;
+        if (line != null && line !== "") {
+          inputText.value = line;
+        }
         if (!consoleState.value.connected) {
           selectedPortName.value = "";
         }
